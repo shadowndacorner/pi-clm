@@ -1,3 +1,5 @@
+// pi-native piece of the facebookresearch/context-language-models port (fork of @lolipopshock/pi-clm).
+// See docs/icl.md for the task contract and provenance.
 import { cp, readdir, readFile, stat } from "node:fs/promises";
 import { basename, isAbsolute, join, resolve } from "node:path";
 import type { Episode } from "./episode.ts";

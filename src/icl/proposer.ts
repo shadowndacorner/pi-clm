@@ -1,3 +1,5 @@
+// Ported from facebookresearch/context-language-models — clm/clm_icl/propose.py.
+// Fork of @lolipopshock/pi-clm; see docs/icl.md for provenance and task contract.
 import { readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";

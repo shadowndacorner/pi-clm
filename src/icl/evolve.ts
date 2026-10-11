@@ -1,3 +1,5 @@
+// Ported from facebookresearch/context-language-models — clm/clm_icl/evolve.py (Evolution).
+// Fork of @lolipopshock/pi-clm; see docs/icl.md for provenance and task contract.
 import { existsSync as fsExistsSync } from "node:fs";
 import { copyFile, cp, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";

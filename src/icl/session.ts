@@ -1,3 +1,5 @@
+// pi-native piece of the facebookresearch/context-language-models port (fork of @lolipopshock/pi-clm).
+// See docs/icl.md for the task contract and provenance.
 import { readdir, readFile } from "node:fs/promises";
 import { basename } from "node:path";
 

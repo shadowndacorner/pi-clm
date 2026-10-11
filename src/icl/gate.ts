@@ -1,3 +1,5 @@
+// Ported from facebookresearch/context-language-models — clm/clm_icl/evolve.py (score/gate/pick/pareto).
+// Fork of @lolipopshock/pi-clm; see docs/icl.md for provenance and task contract.
 import type { Episode } from "./episode.ts";
 import { isValidEpisode } from "./episode.ts";
 

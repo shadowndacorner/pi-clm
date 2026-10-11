@@ -17,7 +17,7 @@
   "bin": {
     "pi-clm-evolve": "bin/pi-clm-evolve.ts"
   },
-  "files": ["index.ts", "src/**", "!src/__tests__/**", "bin/**", "steering/**", "docs/*.md", "LICENSE", "README.md"],
+  "files": ["index.ts", "src/**", "bin/**", "steering/**", "docs/*.md", "LICENSE", "README.md"],
   "scripts": {
     "test": "tsx --test src/__tests__/*.test.ts",
     "typecheck": "tsc --noEmit",

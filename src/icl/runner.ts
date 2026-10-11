@@ -1,3 +1,5 @@
+// pi-native piece of the facebookresearch/context-language-models port (fork of @lolipopshock/pi-clm).
+// See docs/icl.md for the task contract and provenance.
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";

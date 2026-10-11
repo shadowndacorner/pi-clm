@@ -1,3 +1,5 @@
+// pi-native piece of the facebookresearch/context-language-models port (fork of @lolipopshock/pi-clm).
+// See docs/icl.md for the task contract and provenance.
 import type { Episode } from "./episode.ts";
 import { isValidEpisode } from "./episode.ts";
 import { type Score, diffSe, gate, score } from "./gate.ts";
