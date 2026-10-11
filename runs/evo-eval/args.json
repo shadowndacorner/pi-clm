@@ -1,0 +1,14 @@
+[
+ "--tasks",
+ "eval/tasks",
+ "--out",
+ "runs/evo-eval",
+ "--rounds",
+ "1",
+ "--candidates",
+ "2",
+ "--workers",
+ "3",
+ "--timeout-s",
+ "300"
+]

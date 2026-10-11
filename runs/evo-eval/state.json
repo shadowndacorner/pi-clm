@@ -1,0 +1,135 @@
+{
+ "incumbent": "r1-2-answer-sized-io",
+ "round": 1,
+ "noImprove": 0,
+ "skills": {
+  "base": {
+   "round": 0,
+   "parent": null,
+   "status": "retired",
+   "dev": {
+    "n": 6,
+    "n_valid": 6,
+    "acc": 1,
+    "cost": 0.014037393333333334,
+    "cost_metric": "usd",
+    "task_rewards": {
+     "findcall": 1,
+     "fixbug": 1,
+     "fruits": 1,
+     "insight": 1,
+     "summarize": 1,
+     "tally": 1
+    }
+   }
+  },
+  "r1-1-one-check-done": {
+   "round": 1,
+   "parent": "base",
+   "status": "rejected",
+   "dev": {
+    "n": 6,
+    "n_valid": 6,
+    "acc": 1,
+    "cost": 0.014181893333333334,
+    "cost_metric": "usd",
+    "task_rewards": {
+     "findcall": 1,
+     "fixbug": 1,
+     "fruits": 1,
+     "insight": 1,
+     "summarize": 1,
+     "tally": 1
+    }
+   },
+   "gate": "tie within 1 SE, not cheaper: acc 1.0000 vs 1.0000, diff +0.0000, SE 0.0000 (paired); cost 0.01418 vs 0.01404 usd"
+  },
+  "r1-2-answer-sized-io": {
+   "round": 1,
+   "parent": "base",
+   "status": "incumbent",
+   "dev": {
+    "n": 6,
+    "n_valid": 6,
+    "acc": 1,
+    "cost": 0.012009206666666666,
+    "cost_metric": "usd",
+    "task_rewards": {
+     "findcall": 1,
+     "fixbug": 1,
+     "fruits": 1,
+     "insight": 1,
+     "summarize": 1,
+     "tally": 1
+    }
+   },
+   "gate": "tie within 1 SE, lower cost: acc 1.0000 vs 1.0000, diff +0.0000, SE 0.0000 (paired); cost 0.01201 vs 0.01404 usd"
+  }
+ },
+ "history": [
+  {
+   "round": 1,
+   "incumbentBefore": "base",
+   "incumbentScore": {
+    "n": 6,
+    "n_valid": 6,
+    "acc": 1,
+    "cost": 0.014037393333333334,
+    "cost_metric": "usd",
+    "task_rewards": {
+     "findcall": 1,
+     "fixbug": 1,
+     "fruits": 1,
+     "insight": 1,
+     "summarize": 1,
+     "tally": 1
+    }
+   },
+   "candidates": [
+    {
+     "skill": "r1-1-one-check-done",
+     "n": 6,
+     "n_valid": 6,
+     "acc": 1,
+     "cost": 0.014181893333333334,
+     "cost_metric": "usd",
+     "task_rewards": {
+      "findcall": 1,
+      "fixbug": 1,
+      "fruits": 1,
+      "insight": 1,
+      "summarize": 1,
+      "tally": 1
+     },
+     "passed": false,
+     "reason": "tie within 1 SE, not cheaper: acc 1.0000 vs 1.0000, diff +0.0000, SE 0.0000 (paired); cost 0.01418 vs 0.01404 usd"
+    },
+    {
+     "skill": "r1-2-answer-sized-io",
+     "n": 6,
+     "n_valid": 6,
+     "acc": 1,
+     "cost": 0.012009206666666666,
+     "cost_metric": "usd",
+     "task_rewards": {
+      "findcall": 1,
+      "fixbug": 1,
+      "fruits": 1,
+      "insight": 1,
+      "summarize": 1,
+      "tally": 1
+     },
+     "passed": true,
+     "reason": "tie within 1 SE, lower cost: acc 1.0000 vs 1.0000, diff +0.0000, SE 0.0000 (paired); cost 0.01201 vs 0.01404 usd"
+    }
+   ],
+   "rejectedAtValidation": [],
+   "winner": "r1-2-answer-sized-io",
+   "incumbentAfter": "r1-2-answer-sized-io"
+  }
+ ],
+ "devEqualsTrain": true,
+ "frontier": [
+  "r1-2-answer-sized-io"
+ ]
+}

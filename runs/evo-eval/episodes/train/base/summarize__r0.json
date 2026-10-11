@@ -1,0 +1,16 @@
+{
+ "task_id": "summarize",
+ "rep": 0,
+ "reward": 1,
+ "cost": 0.010807879999999999,
+ "cost_metric": "usd",
+ "trajectory_path": "/Users/rileycalhoun/Documents/Projects/pi-clm/runs/evo-eval/trials/train/base/summarize__r0/2026-10-11T08-52-51-363Z_01a12a2a-3423-70dd-b727-939a4f0a08da.jsonl",
+ "error": null,
+ "extra": {
+  "turns": 3,
+  "contextEdits": 0,
+  "gradeDetail": "{\"reward\": 1}",
+  "piExit": 0,
+  "digest": "step 1 | user | notes.txt contains 60 log entries. Write a short summary to summary.md that must mention these five exact words somewhere in it: deploy, cache, latency, retry, quota. Do not quote the whole file; keep summary.md under 40 lines. Reply DONE. | ~in 0 tok\nstep 2 | assistant | tools: read(path) | (thinking 28 ch) | (in 402 / out 19)\nstep 3 | toolResult | 2026-10-02 entry 1: worker b reported quota with value 706 and status ok 2026-10-03 entry 2: worker c reported buffer with value 233 and status ok 2026-10-04 entry 3: worker a reported incident with value 718 and status ok 2026-10-05 entry 4: worker b reported token with value 740 and status ok 2026…\nstep 4 | assistant | tools: write(content,path) | (thinking 961 ch) | (in 1417 / out 758)\nstep 5 | toolResult | Successfully wrote to summary.md\nstep 6 | assistant | (thinking 105 ch) DONE | (in 776 / out 33)"
+ }
+}

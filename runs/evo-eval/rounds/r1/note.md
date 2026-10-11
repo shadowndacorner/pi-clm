@@ -1,0 +1,113 @@
+# Rollouts of the current skill on the training tasks
+
+episodes: 6 (0 without a grade); mean reward 1.000; mean cost 0.014 (usd)
+
+| task | episode | reward | cost | turns | context edits |
+|---|---|---|---|---|---|
+| findcall | E1 | 1.00 | 0.005 | 3 | 0 |
+| fixbug | E2 | 1.00 | 0.018 | 6 | 0 |
+| fruits | E3 | 1.00 | 0.006 | 4 | 0 |
+| insight | E4 | 1.00 | 0.013 | 7 | 0 |
+| summarize | E5 | 1.00 | 0.011 | 3 | 0 |
+| tally | E6 | 1.00 | 0.031 | 8 | 1 |
+
+## Contrastive pairs (n=0)
+
+Each pair is a worse run and a better run, of the same task unless noted.
+
+
+No run did better than another run here; digests of up to 10 runs follow.
+
+
+### E1 (task findcall, reward 1.00)
+
+```
+step 1 | user | Somewhere under lib/ there is a function named parseHeader. Find the file that defines it and write exactly that file name (e.g. foo.js) into answer.md. Reply DONE. | ~in 0 tok
+step 2 | assistant | tools: bash(command) | (thinking 222 ch) | (in 450 / out 94)
+step 3 | toolResult | lib/header.js:2:export function parseHeader(raw) { --- lib/cache.js lib/header.js lib/encode.js lib/decode.js lib/parse.js
+step 4 | assistant | tools: write(content,path) | (thinking 124 ch) `parseHeader` is defined in `lib/header.js`. | (in 137 / out 62)
+step 5 | toolResult | Successfully wrote to answer.md
+step 6 | assistant | DONE | (in 80 / out 3)
+```
+
+### E2 (task fixbug, reward 1.00)
+
+```
+step 1 | user | src/slugs.js has a bug. Run `node src/check.js` to see the failing cases, fix src/slugs.js so that check.js exits 0, and reply DONE. Do not modify check.js. | ~in 0 tok
+step 2 | assistant | tools: bash(command), read(path) | (thinking 31 ch) | (in 390 / out 41)
+step 3 | toolResult | exit: 0
+step 4 | toolResult | // slugify("Hello World 2!") should be "hello-world-2" export function slugify(text) { return text .toLowerCase() .replace(/[^a-z0-9]+/g, "-") .replace(/^-/, "") .replace(/-$/, ""); }
+step 5 | assistant | tools: read(path) | (thinking 153 ch) check.js already exits 0? Let me look closer at what it's testing. | (in 121 / out 67)
+step 6 | toolResult | import { slugify } from "./slugs.js"; const cases = [ ["Hello World 2!", "hello-world-2"], ["大桥 speed-test", "speed-test"], ["already-fine", "already-fine"], ["Trailing DASH ", "trailing-dash"], ]; let bad = 0; for (const [input, expected] of cases) { const got = slugify(input); if (got !== expected…
+step 7 | assistant | tools: bash(command) | (thinking 1357 ch) All 4 cases seem to pass on my run. Let me verify there isn't a different `slugs.js` being resolved (e.g., via package exports or node_modules): | (in 263 / out 489)
+step 8 | toolResult | exit: 0 --- ./src/slugs.js --- total 0 drwx------@ 3 rileycalhoun staff 96 Oct 11 01:52 . drwxr-xr-x@ 9 rileycalhoun staff 288 Oct 11 01:52 .. drwxr-xr-x@ 4 rileycalhoun staff 128 Oct 11 01:52 src Command exited with code 1
+step 9 | assistant | tools: bash(command) | (thinking 454 ch) | (in 603 / out 151)
+step 10 | toolResult | total 16 drwxr-xr-x@ 4 rileycalhoun staff 128 Oct 11 01:52 . drwx------@ 3 rileycalhoun staff 96 Oct 11 01:52 .. -rw-r--r--@ 1 rileycalhoun staff 442 Oct 11 01:52 check.js -rw-r--r--@ 1 rileycalhoun staff 202 Oct 11 01:52 slugs.js exit: 0 exit: 0 exit: 0
+step 11 | assistant | tools: bash(command) | (thinking 1598 ch) | (in 312 / out 540)
+step 12 | toolResult | "Hello World 2!" → "hello-world-2" OK "大桥 speed-test" → "speed-test" OK "already-fine" → "already-fine" OK "Trailing DASH " → "trailing-dash" OK
+step 13 | assistant | (thinking 1153 ch) `node src/check.js` exits 0 — the check already passes with the current `src/slugs.js`, so no fix is needed. I verified: - Ran `node src/check.js` multiple times: exit code 0, no FAIL output - Only one `src/slugs.js` exists (no shadowing via node_modules or package exports) - Imported `slugify` directly and confirmed all 4 cases produce the expected slugs (`hello-world-2`, `spee… | (in 655 / out 431)
+```
+
+### E3 (task fruits, reward 1.00)
+
+```
+step 1 | user | Your task: working in the current directory, make the file fruits.md contain the word "banana" (any case). The file already exists and is empty. You may use your context file (LIVE_CONTEXT.md) to keep notes. Solve the task, then reply DONE. | ~in 0 tok
+step 2 | assistant | tools: bash(command) | (thinking 203 ch) | (in 401 / out 60)
+step 3 | toolResult | total 0 drwx------@ 3 rileycalhoun staff 96 Oct 11 01:52 . drwxr-xr-x@ 9 rileycalhoun staff 288 Oct 11 01:52 .. -rw-r--r--@ 1 rileycalhoun staff 0 Oct 11 01:41 fruits.md
+step 4 | assistant | tools: write(content,path) |  | (in 166 / out 20)
+step 5 | toolResult | Successfully wrote to fruits.md
+step 6 | assistant | tools: bash(command) |  | (in 67 / out 13)
+step 7 | toolResult | banana
+step 8 | assistant | DONE `fruits.md` now contains "banana". | (in 22 / out 14)
+```
+
+### E4 (task insight, reward 1.00)
+
+```
+step 1 | user | requests.log holds 120 request lines like "req N code=X ms=Y". One non-HTTP-standard error code appears in a consecutive block of several lines — find it and write its exact code string (e.g. slow-588) into answer.md. Reply DONE. | ~in 0 tok
+step 2 | assistant | tools: bash(command) | (thinking 37 ch) | (in 407 / out 44)
+step 3 | toolResult | total 8 drwx------@ 3 rileycalhoun staff 96 Oct 11 01:52 . drwxr-xr-x@ 9 rileycalhoun staff 288 Oct 11 01:52 .. -rw-r--r--@ 1 rileycalhoun staff 3463 Oct 11 01:52 requests.log req 1 code=timeout-417 ms=483 req 2 code=rate-429 ms=593 req 3 code=slow-588 ms=897 req 4 code=http-200 ms=819 req 5 code=ti…
+step 4 | assistant | tools: bash(command) | (thinking 78 ch) | (in 232 / out 44)
+step 5 | toolResult | 36 code=timeout-417 28 code=slow-588 28 code=rate-429 28 code=http-200
+step 6 | assistant | tools: bash(command) | (thinking 316 ch) | (in 126 / out 157)
+step 7 | toolResult | code=timeout-417 maxrun=9 at:1,5,9,13,17,21,25,29,33,34,35,36,37,38,39,40,41,45,49,53,57,61,65,69,73,77,81,85,89,93,97,101,105,109,113,117,
+step 8 | assistant | tools: bash(command) | (thinking 228 ch) | (in 307 / out 130)
+step 9 | toolResult | code=timeout-417 9 code=http-200 1 code=rate-429 1 code=slow-588 1
+step 10 | assistant | tools: bash(command) |  | (in 219 / out 31)
+step 11 | toolResult | 34:req 34 code=timeout-417 ms=650 35:req 35 code=timeout-417 ms=685 36:req 36 code=timeout-417 ms=181 37:req 37 code=timeout-417 ms=658 38:req 38 code=timeout-417 ms=35 39:req 39 code=timeout-417 ms=871 40:req 40 code=timeout-417 ms=561
+step 12 | assistant | tools: write(content,path) | (thinking 380 ch) Only `timeout-417` forms a consecutive block — lines 33–41 (9 in a row), while every other code never repeats back-to-back. | (in 164 / out 153)
+step 13 | toolResult | Successfully wrote to answer.md
+step 14 | assistant | DONE | (in 198 / out 3)
+```
+
+### E5 (task summarize, reward 1.00)
+
+```
+step 1 | user | notes.txt contains 60 log entries. Write a short summary to summary.md that must mention these five exact words somewhere in it: deploy, cache, latency, retry, quota. Do not quote the whole file; keep summary.md under 40 lines. Reply DONE. | ~in 0 tok
+step 2 | assistant | tools: read(path) | (thinking 28 ch) | (in 402 / out 19)
+step 3 | toolResult | 2026-10-02 entry 1: worker b reported quota with value 706 and status ok 2026-10-03 entry 2: worker c reported buffer with value 233 and status ok 2026-10-04 entry 3: worker a reported incident with value 718 and status ok 2026-10-05 entry 4: worker b reported token with value 740 and status ok 2026…
+step 4 | assistant | tools: write(content,path) | (thinking 961 ch) | (in 1417 / out 758)
+step 5 | toolResult | Successfully wrote to summary.md
+step 6 | assistant | (thinking 105 ch) DONE | (in 776 / out 33)
+```
+
+### E6 (task tally, reward 1.00)
+
+```
+step 1 | user | The file data.csv has a header "amount" and one integer per line. Compute the total and write EXACTLY {"sum": <total>} (JSON, no other text) into a file named result.json in the current directory. The data is long; use your context file to keep the running total instead of holding every number in yo… | ~in 0 tok
+step 2 | assistant | tools: bash(command) | (thinking 952 ch) | (in 493 / out 233)
+step 3 | toolResult | 41 data.csv amount 42 20 38 54
+step 4 | assistant | tools: bash(command) | (thinking 765 ch) | (in 298 / out 287)
+step 5 | toolResult | TOTAL 1619 {"sum": 1619}
+step 6 | assistant | tools: bash(command) | (thinking 329 ch) | (in 345 / out 172)
+step 7 | toolResult | 00000000: 7b22 7375 6d22 3a20 3136 3139 7d {"sum": 1619} [[LIVE_CONTEXT version=1 revision=0 document=0405b89de93e278c6564f874484362fb3fb42b54cccb4b41b8b1ff8551996c98 baseline=84d3125c9c3e314c46ee7bbabfd738df6b8ac05c983b3ca12ece760caa4cc89f]]
+step 8 | assistant | tools: bash(command) | (thinking 221 ch) result.json is byte-exact. Per the instructions, I'll record the running total in my context file: | (in 340 / out 158)
+step 9 | toolResult | [[LIVE_CONTEXT version=1 revision=0 document=0405b89de93e278c6564f874484362fb3fb42b54cccb4b41b8b1ff8551996c98 baseline=242d64a6a334f20647a5cb9ebfd2cc6c25997f53993ac0fda98f117d78c64a2d]] # Edit bodies or delete editable CTX_TURN blocks. Keep metadata/header lines intact. [[CTX_TURN document=0405b89de…
+step 10 | assistant | tools: edit(edits,path) | (thinking 250 ch) | (in 1744 / out 370)
+step 11 | toolResult | Found 2 occurrences of the text in /var/folders/r2/51cx5qvj22b9mm_g4sgv20cm0000gn/T/pi-live-context-01a12a2a-632e-7331-b6bc-271e9e9b6e8e-4K0JkF/LIVE_CONTEXT.md. The text must be unique. Please provide more context to make it unique.
+step 12 | assistant | tools: bash(command) | (thinking 2373 ch) The mirror regenerated to include my earlier `cat` output, duplicating that line. Let me check the current tail and anchor uniquely: | (in 484 / out 743)
+step 13 | toolResult | The mirror is intact. I'll append a notes CTX_TURN block with the running total/final result, using the same document nonce, unique id, protected=false. Per instructions: copy a current header, unique id=new-NAME, protected=false, role label "notes". [tool call: edit] {"edits":[{"newText":"00000000:…
+step 14 | assistant | tools: bash(command) | (thinking 1543 ch) The mirror regenerates each turn, so I'll append the notes block at the very end of the file instead of anchoring on duplicated text: | (in 1310 / out 575)
+step 15 | toolResult | Found 2 occurrences of the text in /var/folders/r2/51cx5qvj22b9mm_g4sgv20cm0000gn/T/pi-live-context-01a12a2a-632e-7331-b6bc-271e9e9b6e8e-4K0JkF/LIVE_CONTEXT.md. The text must be unique. Please provide more context to make it unique.3 [[CTX_TURN document=0405b89de93e278c6564f874484362fb3fb42b54cccb4b…
+step 16 | assistant | (thinking 150 ch) DONE | (in 906 / out 37)
+```

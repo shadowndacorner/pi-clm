@@ -48,13 +48,15 @@ export class DirTaskSource implements TaskSource {
 		const st = await stat(spec);
 		const dirs: string[] = [];
 		if (st.isDirectory()) {
-			// A single task dir (has TASK.md) or a directory of task dirs.
+			// A single task dir (has TASK.md) or a directory of task dirs. Task
+			// paths are stored ABSOLUTE: scripts (grade.sh) run with the episode
+			// work directory as cwd, so a relative path would silently break.
 			const entries = await readdir(spec);
 			if (entries.includes("TASK.md")) {
-				dirs.push(spec);
+				dirs.push(resolve(spec));
 			} else {
 				for (const e of entries) {
-					const p = join(spec, e);
+					const p = resolve(spec, e);
 					if ((await stat(p)).isDirectory() && (await readdir(p)).includes("TASK.md")) dirs.push(p);
 				}
 			}
@@ -75,6 +77,11 @@ export class DirTaskSource implements TaskSource {
 
 	taskIds(): string[] {
 		return [...this.tasks.keys()].sort();
+	}
+
+	/** Absolute task directories, sorted (episode workdirs and graders use these). */
+	dirs(): string[] {
+		return [...this.tasks.values()].sort();
 	}
 
 	async prompt(taskId: string): Promise<string> {
