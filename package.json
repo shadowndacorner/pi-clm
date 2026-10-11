@@ -14,11 +14,15 @@
     "extensions": ["./index.ts"],
     "image": "https://raw.githubusercontent.com/lolipopshock/pi-clm/main/.github/images/overview.png"
   },
-  "files": ["index.ts", "src/**", "!src/__tests__/**", "steering/**", "docs/*.md", "LICENSE", "README.md"],
+  "bin": {
+    "pi-clm-evolve": "bin/pi-clm-evolve.ts"
+  },
+  "files": ["index.ts", "src/**", "!src/__tests__/**", "bin/**", "steering/**", "docs/*.md", "LICENSE", "README.md"],
   "scripts": {
     "test": "tsx --test src/__tests__/*.test.ts",
     "typecheck": "tsc --noEmit",
-    "check": "tsc --noEmit && tsx --test src/__tests__/*.test.ts"
+    "check": "tsc --noEmit && tsx --test src/__tests__/*.test.ts",
+    "evolve": "tsx bin/pi-clm-evolve.ts"
   },
   "peerDependencies": {
     "@earendil-works/pi-agent-core": "*",

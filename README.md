@@ -37,6 +37,23 @@ pi -e git:github.com/lolipopshock/pi-clm
 In the panel: `1–4` or `Tab` switch pages, `← →` step through compaction points, `z`
 zooms the chart, `Enter` opens the selection, `q` closes.
 
+## In-context skill evolution (fork feature)
+
+This fork ports the paper's ICL skill-optimization loop
+([clm_icl](https://github.com/facebookresearch/context-language-models)) to pi:
+a `SKILL.md` steering skill is evolved from the agent's own pi rollouts with a
+contrastive note, a strict-contract proposer, and a paired-SE selection gate.
+
+```sh
+npx tsx bin/pi-clm-evolve.ts --tasks tasks/train --dev-tasks tasks/dev \
+  --proposer-model anthropic/claude-sonnet-4.5 --rounds 5 --candidates 4 \
+  --workers 8 --out runs/evo1
+```
+
+Task contract, gate details, run-directory layout and examples:
+[docs/icl.md](docs/icl.md). The loop is fully resumable; episodes run as real
+`pi -ne -e <plugin>` sessions and costs come from the provider's own usage.
+
 ## Docs
 
 - [How it works](docs/how-it-works.md) — the mirror, what runs without the model, the panel, safety.
