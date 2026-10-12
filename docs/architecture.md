@@ -408,14 +408,40 @@ estimate is calibrated against the count (§7a).
 usage already in the session file, and compaction points from revision entries, so the
 panel works on resume without extra persistence.
 
-### Known limitations
+### Known limitations (updated 2026-10-11)
 
-- The turn that performs an edit — the tool call that wrote the mirror, and its result —
-  stays in the context after the edit is accepted, until the model removes it in a later
-  edit.
-- Editing the body of a tool result turns its paired assistant message into text; the
-  structured tool call is not kept.
-- Accept and reject notices are shown to the model for one request only.
-- Pi's `/compact` summarizes the raw transcript and resets the projection, and the branch
-  summarizer reads the raw branch (§6).
-- Tool backends on another machine or in a container cannot see the mirror (§9).
+Four of the five previously documented limitations were fixed in this fork
+(failing-first tests in `src/__tests__/limitations.test.ts`); one is a
+deliberate design boundary, not an omission:
+
+- **Fixed — lingering edit turn.** The turn that performed the accepted edit
+  (its assistant mirror-write call and tool results) is now consumed into the
+  revision's checkpoint anchor at acceptance: it stays in the raw transcript
+  for provenance but no longer projects into the next request. If a foreign
+  context handler mutates the hook message space, the next projection
+  validation fails closed to the raw context with a notice (same degradation
+  as any other stale projection).
+- **Fixed — broken tool pair demotion.** When the model deletes one side of a
+  call/result pair, the whole group is now dropped (pure tool-call assistants)
+  or loses only the orphaned result, instead of demoting the assistant message
+  into a text note that retained the tool-call text. Text-bearing assistants
+  still keep the demote fallback, which preserves their prose.
+- **Fixed — one-request-only notices.** Outcome notices (accepted / rejected
+  edits) now repeat for up to one additional request (and are cleared on
+  outcome change, disable, reset, tree move, or session start), so the model
+  can actually react to what its edit did.
+- **Deliberate — Pi's native `/compact` resets the projection and the branch
+  summarizer reads the raw branch (§6).** Supporting CLM-owned compaction in
+  Pi's native compaction path would mean replacing Pi's summarization of the
+  raw transcript and re-anchoring every checkpoint mid-history: a redesign of
+  the recovery protocol, not a bug fix. The existing mitigations stand:
+  automatic compaction is paused by default (`compaction` setting `auto`)
+  while the overflow guard enforces the budget, and the model can self-compact
+  via mirror edits or `/clm-compact`. Manual `/compact` remains an explicit
+  operator action that intentionally resets the projection to the summarized
+  raw baseline. Revisit only with a dedicated design.
+- **Fixed — container-invisible mirror.** `PI_CLM_MIRROR_DIR` (or the same
+  value via the plugin's settings) relocates the private mirror to any
+  directory — for example a path mounted into the container where the tool
+  backends run — so tool backends on another machine can see and edit the
+  mirror.

@@ -234,6 +234,9 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 	/** A /clm-compact waiting for the agent to go idle; a second one is refused instead of racing it. */
 	let compactPending = false;
 	let pendingNotice: string | undefined;
+	let stickyNotice: string | undefined;
+	let stickyNoticeRepeats = 0;
+	const STICKY_NOTICE_REPEATS = 1;
 	let mirrorMutationSeen = false;
 	let invalidationStreak = 0;
 	let compositionWarned = false;
@@ -639,7 +642,10 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 		await store?.cleanup().catch(() => undefined);
 		store = undefined;
 		try {
-			store = await MirrorStore.create(ctx.sessionManager.getSessionId());
+			// §11 limitation 5 workaround: PI_CLM_MIRROR_DIR points the mirror at a
+			// directory the agent's tool backends can see (e.g. a mounted volume).
+			const mirrorDir = process.env["PI_CLM_MIRROR_DIR"]?.trim() || undefined;
+			store = await MirrorStore.create(ctx.sessionManager.getSessionId(), mirrorDir);
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
 			pendingNotice = `[LIVE CONTEXT] Could not initialize the private mirror: ${message}`;
@@ -649,6 +655,8 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 
 	function restore(ctx: ExtensionContext): void {
 		lifecycleEpoch++;
+		stickyNotice = undefined;
+		stickyNoticeRepeats = 0;
 		const branch = ctx.sessionManager.getBranch() as ContinuitySessionEntryLike[];
 		state = reconstructLiveContextState(branch);
 		checkpointHistory = reconstructLiveContextHistory(branch)
@@ -675,6 +683,10 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 
 	function queueOutcomeNotice(message: string): void {
 		pendingNotice = `[LIVE CONTEXT] ${message}`;
+		// §11 limitation 3 fix: the outcome stays visible beyond one request so the
+		// model can react to an edit's result; bounded, cleared on outcome change.
+		stickyNotice = pendingNotice;
+		stickyNoticeRepeats = STICKY_NOTICE_REPEATS;
 	}
 
 	function findHistoricalRecovery(rawMessages: LiveContextMessage[]): {
@@ -1222,6 +1234,8 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 				turnBaseline = undefined;
 				currentContextView = undefined;
 				updateStatus(ctx);
+				stickyNotice = undefined;
+				stickyNoticeRepeats = 0;
 				ctx.ui.notify("Live context disabled. Raw Pi context will be used.", "info");
 				return;
 			case "reset":
@@ -1232,6 +1246,8 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 				lastBudgetReading = undefined;
 				projectionReplaced = true;
 				updateStatus(ctx);
+				stickyNotice = undefined;
+				stickyNoticeRepeats = 0;
 				ctx.ui.notify("Live-context projection reset. Raw Pi context will be used.", "info");
 				return;
 			default:
@@ -1411,7 +1427,8 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 		}
 
 		const output = [...modelEffectiveMessages];
-		const outcomeNotice = pendingNotice;
+		const outcomeNotice = pendingNotice ?? (stickyNoticeRepeats > 0 && stickyNotice ? stickyNotice : undefined);
+		if (!pendingNotice && outcomeNotice && stickyNoticeRepeats > 0) stickyNoticeRepeats -= 1;
 		const sizeNotice = continuitySizeNotice(managedContinuity);
 		const overflowNotice = pendingOverflowNotice;
 		const notices = [
@@ -1549,7 +1566,7 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 		return { content };
 	});
 
-	pi.on("turn_end", async (_event, ctx) => {
+	pi.on("turn_end", async (event, ctx) => {
 		if (!state.enabled || !store) return;
 		captureObservedUsage(ctx);
 		if (!turnBaseline) return;
@@ -1603,11 +1620,28 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 
 		const revision = state.revision + 1;
 		const appliedMessage = `Applied revision ${revision}; estimated tokens ${beforeTokens}→${afterTokens}.`;
+		// §11 limitation 1 fix: the turn that performed the accepted edit — its
+		// assistant message (mirror write) and tool results — is consumed into the
+		// checkpoint anchor, so it stops lingering in the projected context. The
+		// mirror text governs the turn's content; the raw transcript keeps it.
+		const editTurnMessages = [
+			...((event as { message?: { role?: string } | undefined })?.message?.role === "assistant"
+				? [(event as { message: unknown }).message]
+				: []),
+			...(((event as { toolResults?: unknown[] | undefined })?.toolResults ?? []) as unknown[]).filter(
+				(candidate) =>
+					candidate && (candidate as { role?: string }).role === "toolResult",
+			),
+		] as AgentMessage[];
+		const editTurnRaw = asLiveMessages(editTurnMessages);
+		const anchoredSource = editTurnRaw.length > 0
+			? [...baseline.rawMessages, ...editTurnRaw]
+			: baseline.rawMessages;
 		let checkpoint;
 		try {
 			checkpoint = createProjectionCheckpoint({
 				revision,
-				sourceMessages: baseline.rawMessages,
+				sourceMessages: anchoredSource,
 				projectedMessages: result.messages,
 				beforeEstimate: beforeTokens,
 				afterEstimate: afterTokens,
