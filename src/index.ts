@@ -39,6 +39,7 @@ import {
 } from "./continuity.ts";
 import { MirrorStore } from "./mirror-store.ts";
 import { installedForSteeringSync } from "./icl/skills-registry.ts";
+import { attachSubagentsAdapter } from "./icl/subagents-adapter.ts";
 import {
 	BudgetTracker,
 	EstimateCalibrator,
@@ -238,6 +239,11 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 	let stickyNotice: string | undefined;
 	let stickyNoticeRepeats = 0;
 	const STICKY_NOTICE_REPEATS = 1;
+	// §roadmap #1: per-subagent context coexistence — registers this plugin into
+	// pi-subagents' required-child-extensions registry in session_start, so
+	// spawned children load the same CLM entry and keep their own private
+	// per-session mirrors (parent and child contexts coexist as files).
+	let subagentsAdapter: ReturnType<typeof attachSubagentsAdapter> | undefined;
 	let mirrorMutationSeen = false;
 	let invalidationStreak = 0;
 	let compositionWarned = false;
@@ -1270,7 +1276,23 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 		);
 	}
 
-	pi.on("session_start", async (_event, ctx) => {
+	pi.on("session_start", async (event, ctx) => {
+		subagentsAdapter ??= attachSubagentsAdapter(process.env, (message) => {
+			ctx?.ui?.notify?.(`[LIVE CONTEXT] ${message}`, "warning");
+		});
+		void subagentsAdapter.register({ sessionId: ctx?.sessionManager?.getSessionId?.() }).catch(() => undefined);
+		// Live-smoke diagnostic (opt-in via PI_CLM_SMOKE_MARKER): records each pi
+		// session that CLM-initialized (parent and spawned children), for the
+		// coexistence smoke script in scripts/live-coexistence-smoke.sh.
+		const smokeMarker = process.env["PI_CLM_SMOKE_MARKER"]?.trim();
+		if (smokeMarker) {
+			try {
+				const { appendFileSync } = await import("node:fs");
+				appendFileSync(smokeMarker, `${new Date().toISOString()} session ${ctx?.sessionManager?.getSessionId?.() ?? "?"}\n`);
+			} catch {
+				// diagnostics only
+			}
+		}
 		pressure.reset();
 		budgetTracker.reset();
 		mirrorMutationSeen = false;
@@ -1736,6 +1758,8 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 	});
 
 	pi.on("session_shutdown", async (_event, ctx) => {
+		subagentsAdapter?.dispose();
+		subagentsAdapter = undefined;
 		lifecycleEpoch++;
 		turnBaseline = undefined;
 		currentContextView = undefined;

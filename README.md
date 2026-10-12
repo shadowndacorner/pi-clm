@@ -37,6 +37,15 @@ pi -e git:github.com/lolipopshock/pi-clm
 In the panel: `1–4` or `Tab` switch pages, `← →` step through compaction points, `z`
 zooms the chart, `Enter` opens the selection, `q` closes.
 
+## Multi-agent context coexistence (fork feature)
+
+The plugin registers itself into pi-subagents' required-child-extensions
+registry so every spawned child agent loads the same CLM entry and keeps its
+own private per-session context mirror: parent and children each manage their
+own context as a file. `PI_CLM_SUBAGENTS=off` disables. Details, unit tests and
+the live smoke: [docs/multiagent.md](docs/multiagent.md), and
+`scripts/live-coexistence-smoke.sh` runs the real-model check.
+
 ## In-context skill evolution (fork feature)
 
 This fork ports the paper's ICL skill-optimization loop
