@@ -43,6 +43,13 @@ export function steeringPromptSection(doc: SteeringDocument): string {
 	return `## Context-management guidance (${doc.name})\n\n${doc.text}`;
 }
 
-export function steeringStatusLine(doc: SteeringDocument | undefined): string {
-	return doc ? `steering: ${doc.name} (sha256sum ${doc.hash}…) · ${doc.path}` : "steering: none (protocol only)";
+export function steeringStatusLine(
+	doc: SteeringDocument | undefined,
+	// Injected to avoid a hard dependency cycle in the viewer; src/icl/skills-registry.
+	installed?: { name: string; seq: number; sha256: string; sourceRun: string | null } | null,
+): string {
+	const base = doc ? `steering: ${doc.name} (sha256sum ${doc.hash}…) · ${doc.path}` : "steering: none (protocol only)";
+	if (!installed) return base;
+	const run = installed.sourceRun ? ` · from ${installed.sourceRun}` : "";
+	return `${base} · installed: ${installed.name} v${installed.seq} (sha ${installed.sha256.slice(0, 8)}…)${run}`;
 }

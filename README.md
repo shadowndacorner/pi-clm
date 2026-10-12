@@ -51,7 +51,9 @@ npx tsx bin/pi-clm-evolve.ts --tasks tasks/train --dev-tasks tasks/dev \
 ```
 
 Task contract, gate details, run-directory layout and examples:
-[docs/icl.md](docs/icl.md). The loop is fully resumable; episodes run as real
+[docs/icl.md](docs/icl.md). Wire the winner into daily use with
+`pi-clm-skill use` (`--run` / `--status` / `--rollback`) — `PI_CLM_STEERING`
+then points at the registry's stable `active-skill.md`. The loop is fully resumable; episodes run as real
 `pi -ne -e <plugin>` sessions and costs come from the provider's own usage.
 
 ## Docs

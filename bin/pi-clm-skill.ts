@@ -10,10 +10,13 @@
  *   (skill use — winner→daily-driver installation — lands with the wiring task.)
  */
 import { readFile, stat } from "node:fs/promises";
+import { mkdir } from "node:fs/promises";
+void mkdir;
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { episodeToDict, type Episode } from "../src/icl/episode.ts";
 import { checkRegression } from "../src/icl/check.ts";
+import { activeSkillPath, fileExists, installSkill, registryHome, registryStatus, rollbackSkill } from "../src/icl/skills-registry.ts";
 import { type CostMetric, PiRunner } from "../src/icl/runner.ts";
 import { loadDirTaskSource, type DirTaskSource } from "../src/icl/tasks.ts";
 
@@ -40,7 +43,16 @@ function usage(): void {
 	process.stdout.write(
 		`pi-clm-skill — skill lifecycle commands for the pi-clm fork
 
-usage: npx tsx bin/pi-clm-skill.ts check [options]
+usage: npx tsx bin/pi-clm-skill.ts check|use [options]
+
+use (winner → daily-driver wiring):
+  --run PATH        evolve run dir: installs its best_skill/incumbent
+  --skill DIR|SKILL.md   install this skill instead (alternative to --run)
+  --name NAME       skill name override (default: frontmatter name)
+  --rollback        roll back to the previous installed version
+  --status          show the registry (installed versions, active pointer)
+  --home PATH       registry home (default: ~/.pi/agent/clm; env PI_CLM_SKILL_HOME)
+  --out PATH        record path (default <home>/status.json / <runDir>/check.json)
 
 check (stop-on-regression eval gate):
   --run PATH        evolve run dir: candidate = its incumbent/best_skill
@@ -229,6 +241,103 @@ async function runCheck(rest: string[]): Promise<number> {
 	return 0;
 }
 
+
+async function runUse(rest: string[]): Promise<number> {
+	const flags = new Map<string, string | boolean>();
+	for (let i = 0; i < rest.length; i++) {
+		const flag = rest[i]!;
+		if (flag === "--rollback" || flag === "--status" || flag === "-h" || flag === "--help") flags.set(flag, true);
+		else if (flag.startsWith("--")) {
+			const value = rest[++i];
+			if (value === undefined) throw new Error(`missing value for ${flag}`);
+			flags.set(flag, value);
+		} else throw new Error(`unexpected argument: ${flag}`);
+	}
+	if (flags.get("-h") || flags.get("--help")) {
+		usage();
+		return 0;
+	}
+	const env: NodeJS.ProcessEnv = {
+		...process.env,
+		...(flags.has("--home") ? { PI_CLM_SKILL_HOME: String(flags.get("--home")) } : {}),
+	};
+	if (flags.has("--status")) {
+		const status = await registryStatus(env);
+		const outPath = flags.has("--out")
+			? String(flags.get("--out"))
+			: join(status.home, "status.json");
+		await (await import("node:fs/promises")).writeFile(
+			outPath,
+			`${JSON.stringify(status.registry, null, 1)}\n`,
+			"utf8",
+		);
+		const active = status.registry.installed.find((r) => r.seq === status.registry.active?.seq);
+		process.stdout.write(
+			`registry ${status.home}\n` +
+				`installed versions: ${status.registry.installed.length}\n` +
+				(active ? `active: ${active.name} v${active.seq} (sha ${active.sha256.slice(0, 8)}…)\n` : "active: none\n") +
+				`steering export: PI_CLM_STEERING=${status.activeSkillPath}\n` +
+				`record: ${outPath}\n`,
+		);
+		return 0;
+	}
+	if (flags.has("--rollback")) {
+		const result = await rollbackSkill(env);
+		if (!result.rolledBack) {
+			process.stderr.write(`rollback failed: ${result.reason}\n`);
+			return 1;
+		}
+		const recordPath = join(registryHome(env), "rollback.json");
+		await (await import("node:fs/promises")).writeFile(
+			recordPath,
+			`${JSON.stringify({ from: result.from, to: result.to, at: new Date().toISOString() }, null, 1)}\n`,
+			"utf8",
+		);
+		process.stdout.write(
+			`rolled back ${result.from.name} v${result.from.seq} → ${result.to.name} v${result.to.seq}\n` +
+				`active file updated; record: ${recordPath}\n` +
+				`steering export stays: PI_CLM_STEERING=${activeSkillPath(env)}\n`,
+		);
+		return 0;
+	}
+	const run = flags.has("--run") ? String(flags.get("--run")) : null;
+	const skill = flags.has("--skill") ? String(flags.get("--skill")) : null;
+	if (!run && !skill) throw new Error("pass --run (evolve run dir) or --skill (dir/SKILL.md)");
+	let source: string;
+	let sourceRun: string | null = null;
+	if (run) {
+		const runDir = resolve(run);
+		const best = join(runDir, "best_skill", "SKILL.md");
+		const state = JSON.parse(await readFile(join(runDir, "state.json"), "utf8")) as {
+			incumbent: string;
+			skills: Record<string, unknown>;
+		};
+		source = (await fileExists(best))
+			? best
+			: join(runDir, "skills", state.incumbent, "SKILL.md");
+		if (!(await fileExists(source))) throw new Error(`run ${runDir}: no SKILL.md for incumbent ${state.incumbent}`);
+		sourceRun = runDir;
+	} else {
+		source = resolve(skill!);
+	}
+	const resolved = await stat(source);
+	const skillFile = resolved.isDirectory() ? join(source, "SKILL.md") : source;
+	let name = flags.has("--name") ? String(flags.get("--name")) : "";
+	if (!name) {
+		const text = await readFile(skillFile, "utf8");
+		name = /^name:\s*(.+)$/m.exec(text)?.[1]?.trim() ?? "";
+	}
+	const record = await installSkill({ source: skillFile, name: name || undefined, sourceRun, env });
+	process.stdout.write(
+		(record.firstInstall ? "installed" : "re-activated") +
+			` ${record.name || "(unnamed)"} v${record.seq} (sha ${record.sha256.slice(0, 8)}…)\n` +
+			`skill file: ${record.path}\n` +
+			`active file: ${activeSkillPath(env)}\n` +
+			`keep this in your shell profile: export PI_CLM_STEERING=${activeSkillPath(env)}\n`,
+	);
+	return 0;
+}
+
 async function main(argv: string[]): Promise<number> {
 	const { mode, rest } = parseArgs(argv);
 	if (!mode || mode === "-h" || mode === "--help") {
@@ -237,8 +346,8 @@ async function main(argv: string[]): Promise<number> {
 	}
 	switch (mode) {
 		case "check": return await runCheck(rest);
-		case "use": throw new Error("`skill use` lands with the #2 wiring task");
-		default: throw new Error(`unknown command: ${mode} (available: check)`);
+		case "use": return await runUse(rest);
+		default: throw new Error(`unknown command: ${mode} (available: check, use)`);
 	}
 }
 

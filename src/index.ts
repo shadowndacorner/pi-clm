@@ -38,6 +38,7 @@ import {
 	type LiveContextRetention,
 } from "./continuity.ts";
 import { MirrorStore } from "./mirror-store.ts";
+import { installedForSteeringSync } from "./icl/skills-registry.ts";
 import {
 	BudgetTracker,
 	EstimateCalibrator,
@@ -520,7 +521,15 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 				: `          estimate ×${calibrator.factor.toFixed(2)}, calibrated from ${calibrator.sampleCount} provider count${calibrator.sampleCount === 1 ? "" : "s"}`,
 			`Guard     ${overflowGuard.mode === "off" ? "off" : `withholds the oldest tool results above ${limit === undefined ? "?" : formatTokens(limit)}`}${nativeCompaction === "on" ? "" : nativeCompaction === "off" ? " · Pi's automatic compaction off" : overflowGuard.mode === "off" ? "" : " · Pi's automatic compaction paused"}`,
 			// The steering hash identifies an experiment arm exactly (matches `sha256sum`).
-			...(steering ? [`Prompt    steering ${steering.name} (sha256sum ${steering.hash}…) · ${steering.path}`] : []),
+			...(steering ? [(() => {
+				// Daily-driver wiring: when the steering doc is the registry-managed
+				// active file, show the installed skill identity and version.
+				const installed = installedForSteeringSync(steering.path);
+				const base = `Prompt    steering ${steering.name} (sha256sum ${steering.hash}…) · ${steering.path}`;
+				return installed
+					? `${base} · installed: ${installed.name || "(unnamed)"} v${installed.seq}${installed.sourceRun ? ` · from ${installed.sourceRun}` : ""}`
+					: base;
+			})()] : []),
 			`Files     mirror ${store ? shortPath(store.filePath) : "unavailable"} (full path: /clm path)`,
 			`          annotations ${annotations.length === 0 ? "none" : `${active} continuity/pin · ${archived} archive · ${annotations.length} total`}${maxTokensLifts > 0 ? ` · max_tokens clamp lifted on ${maxTokensLifts} request${maxTokensLifts === 1 ? "" : "s"}` : ""}`,
 			...warnings(),

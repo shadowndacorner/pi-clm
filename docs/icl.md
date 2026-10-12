@@ -125,6 +125,39 @@ Evaluate the final skill yourself once on a separate test set. To put the
 winner into daily use, point `PI_CLM_STEERING` at its SKILL.md (or pass the
 path in the plugin's `/clm config steering` panel).
 
+## Daily-driver wiring (skill use)
+
+The `pi-clm-skill` CLI's `use` subcommand is the bridge between an evolve run's
+winner and everyday sessions:
+
+```sh
+# one-time: point the plugin at the managed active file
+export PI_CLM_STEERING=~/.pi/agent/clm/active-skill.md
+
+# install the winner of a run (versioned record + activation)
+npx tsx bin/pi-clm-skill.ts use --run runs/evo-eval
+
+# inspect: installed versions, active pointer, sha, source run
+npx tsx bin/pi-clm-skill.ts use --status
+
+# not happy with the new skill? back to the previous installed version
+npx tsx bin/pi-clm-skill.ts use --rollback
+```
+
+Registry layout (`$HOME/.pi/agent/clm`, override with `PI_CLM_SKILL_HOME`):
+
+```
+skills/<sha8>.md      content-addressed installed skills
+installed.json        versioned record (seq, name, sha256, sourceRun, activated at)
+active-skill.md       copy of the ACTIVE skill content
+```
+
+The `/clm` panel shows the installed identity on the steering row when the
+steering document is the registry-managed active file:
+`Prompt steering active-skill.md (sha256sum …) · … · installed: <name> v<N> ·
+from <run>`. Re-installing identical content re-activates without a new
+version; a rollback with a single installed version fails closed.
+
 ## Provenance & tests
 
 - Algorithm, note builder, proposer prompt (verbatim copy), and gate: ported
