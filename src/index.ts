@@ -1280,7 +1280,7 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 		subagentsAdapter ??= attachSubagentsAdapter(process.env, (message) => {
 			ctx?.ui?.notify?.(`[LIVE CONTEXT] ${message}`, "warning");
 		});
-		void subagentsAdapter.register({ sessionId: ctx?.sessionManager?.getSessionId?.() }).catch(() => undefined);
+		await subagentsAdapter.register({ sessionId: ctx?.sessionManager?.getSessionId?.() }).catch(() => undefined);
 		// Live-smoke diagnostic (opt-in via PI_CLM_SMOKE_MARKER): records each pi
 		// session that CLM-initialized (parent and spawned children), for the
 		// coexistence smoke script in scripts/live-coexistence-smoke.sh.

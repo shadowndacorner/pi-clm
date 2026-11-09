@@ -147,6 +147,8 @@ export function attachSubagentsAdapter(
 	options: AttachOptions & { parentDir?: string } = {},
 ): SubagentsAdapter {
 	let registration: Registration | null = null;
+	let generation = 0;
+	let registeredSession: string | undefined;
 	const entryPath = options.entryPath ?? entryFileFor(import.meta.url);
 	return {
 		get registration() {
@@ -155,18 +157,24 @@ export function attachSubagentsAdapter(
 		async register(options: { sessionId?: string | null } = {}, envLocal = env): Promise<{ registered: boolean; reason?: string }> {
 			if (flagIsOff(envLocal, "PI_CLM_SUBAGENTS")) return { registered: false, reason: "disabled by PI_CLM_SUBAGENTS" };
 			try {
-				if (registration) return { registered: true, reason: "already registered" };
+				const sessionId = options.sessionId ?? sessionIdOf(envLocal);
+				if (!sessionId) return { registered: false, reason: "no session id" };
+				if (registration && registeredSession === sessionId) return { registered: true, reason: "already registered" };
+				const epoch = ++generation;
+				registration?.dispose();
+				registration = null;
+				registeredSession = undefined;
 				const registrar = await resolveRegistrar(envLocal);
+				if (epoch !== generation) return { registered: false, reason: "registration superseded or disposed" };
 				if (!registrar) {
 					const message = "pi-subagents required child extension registry not found; subagent children will not load the CLM extension";
 					if (flagIs(envLocal, "PI_CLM_SUBAGENTS")) logWarning(message);
 					return { registered: false, reason: "registrar not found" };
 				}
-				const sessionId = options.sessionId ?? sessionIdOf(envLocal);
-				if (!sessionId) return { registered: false, reason: "no session id" };
 				registration = registrar.registerRequiredChildExtensions(
 					buildRegistrationPayload(sessionId, entryPath) as never,
 				);
+				registeredSession = sessionId;
 				return { registered: true };
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
@@ -175,6 +183,8 @@ export function attachSubagentsAdapter(
 			}
 		},
 		dispose(): void {
+			generation++;
+			registeredSession = undefined;
 			try {
 				registration?.dispose();
 			} catch {

@@ -326,6 +326,12 @@ function changedMessage(source: LiveContextMessage, body: string, requestedRole:
 		delete changed.tool_calls;
 		return changed;
 	}
+	// Only a source-backed result may retain a structured tool identity. Never
+	// infer identity from the order of edited blocks or model-authored notes.
+	if (source.role === "toolResult" && requestedRole === "toolResult") {
+		return { ...source, content: [{ type: "text", text: body }],
+			details: { ...(source.details as Record<string, unknown> | undefined), clmEdited: true } };
+	}
 	if (source.role === "user" && requestedRole === "user") {
 		return {
 			...source,
@@ -335,25 +341,13 @@ function changedMessage(source: LiveContextMessage, body: string, requestedRole:
 	return contextNote(body, source, labelRole ? requestedRole : undefined);
 }
 
-function isToolResultNote(message: LiveContextMessage): boolean {
-	return message.role === "custom" &&
-		message.customType === "live-context-projection" &&
-		(message.details as { contextRole?: unknown } | undefined)?.contextRole === "toolResult";
-}
-
-function noteBody(message: LiveContextMessage): string {
-	const raw = typeof message.content === "string" ? message.content : textFromContent(message.content);
-	const prefix = "[context role=toolResult]\n";
-	return raw.startsWith(prefix) ? raw.slice(prefix.length) : raw;
-}
-
 function repairToolGroups(messages: LiveContextMessage[]): LiveContextMessage[] {
 	const repaired = [...messages];
 
 	// §11 limitation 2 fix. A broken tool-call group (the model edited or deleted
 	// one side of a call/result pair) is resolved structure-preserving:
-	// - an edited result that the block mapper demoted to a toolResult-role note is
-	//   rebuilt into a real toolResult message (assistant keeps its structured call);
+	// - source-backed edited results retain their original call identity;
+	//   model-authored notes are never promoted into tool results;
 	// - a deleted side drops the whole group when the assistant is pure tool calls;
 	// - text-bearing assistants keep upstream's demote fallback, which preserves
 	//   their prose. Behavior pinned by limitations.test.ts + stable-document tests.
@@ -378,29 +372,6 @@ function repairToolGroups(messages: LiveContextMessage[]): LiveContextMessage[] 
 		const complete = missing.length === 0;
 		if (complete) continue;
 
-		// Rebuild demoted edited results into real toolResults, ids by call order.
-		const noteRun: number[] = [];
-		let scan = cursor;
-		while (scan < repaired.length && isToolResultNote(repaired[scan]!)) {
-			noteRun.push(scan);
-			scan++;
-		}
-		if (noteRun.length > 0 && noteRun.length <= missing.length) {
-			let position = 0;
-			for (const noteIndex of noteRun) {
-				repaired[noteIndex] = {
-					role: "toolResult",
-					toolCallId: missing[position] ?? missing[0]!,
-					content: [{ type: "text", text: noteBody(repaired[noteIndex]!) }],
-					display: true,
-					timestamp: typeof repaired[noteIndex]!.timestamp === "number"
-						? repaired[noteIndex]!.timestamp
-						: Date.now(),
-				};
-				position++;
-			}
-			continue;
-		}
 
 		const hasText = Array.isArray(message.content)
 			&& (message.content as Array<Record<string, unknown>>).some(
