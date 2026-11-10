@@ -125,10 +125,30 @@ export function isLiveContextState(value: unknown): value is LiveContextState {
 	);
 }
 
+/**
+ * Drop a malformed edit trace instead of the whole checkpoint it belongs to.
+ *
+ * A trace is provenance for an accepted mirror edit, not content the next request is built
+ * from. Older builds wrote traces whose `outputIndex` could point past the projected output,
+ * and rejecting the checkpoint outright silently discarded every compaction written after
+ * the first such trace: the seat resumed on a much older projection, so the compaction rounds
+ * the meter reported were never applied to the outgoing request.
+ */
+export function normalizeLiveContextState(value: unknown): unknown {
+	if (!value || typeof value !== "object") return value;
+	const state = value as Partial<LiveContextState>;
+	const checkpoint = state.checkpoint as Partial<ProjectionCheckpoint> | undefined;
+	if (!checkpoint || isProjectionCheckpoint(checkpoint)) return value;
+	if (checkpoint.editTrace === undefined) return value;
+	const { editTrace: _dropped, ...rest } = checkpoint as ProjectionCheckpoint;
+	const repaired = { ...state, checkpoint: rest };
+	return isLiveContextState(repaired) ? repaired : value;
+}
+
 export function reconstructLiveContextHistory(entries: SessionEntryLike[]): LiveContextState[] {
 	return entries
 		.filter((entry) => entry.type === "custom" && entry.customType === LIVE_CONTEXT_STATE)
-		.map((entry) => entry.data)
+		.map((entry) => normalizeLiveContextState(entry.data))
 		.filter(isLiveContextState);
 }
 
@@ -160,13 +180,14 @@ export function reconstructLiveContextState(entries: SessionEntryLike[]): LiveCo
 	for (let index = entries.length - 1; index >= 0; index--) {
 		const entry = entries[index];
 		if (entry.type !== "custom" || entry.customType !== LIVE_CONTEXT_STATE) continue;
-		if (!isLiveContextState(entry.data)) continue;
+		const data = normalizeLiveContextState(entry.data);
+		if (!isLiveContextState(data)) continue;
 		if (!latest) {
-			latest = entry.data;
+			latest = data;
 			if (latest.checkpoint) return latest;
 			continue;
 		}
-		const checkpoint = entry.data.checkpoint;
+		const checkpoint = data.checkpoint;
 		if (!checkpoint) continue;
 		return checkpoint.revision === latest.revision ? { ...latest, checkpoint } : latest;
 	}

@@ -4,8 +4,12 @@ import { describe, test } from "node:test";
 import { digestMessages } from "../context-document.ts";
 import {
 	applyProjection,
+	attachSourceEntriesFromBranch,
 	createProjectionCheckpoint,
+	PROJECTION_NO_ENTRY_IDENTITY_REASON,
+	reanchorProjection,
 	recoverProjectionFromRetryErrors,
+	toSourceEntryRefs,
 } from "../projection.ts";
 import {
 	LIVE_CONTEXT_STATE,
@@ -208,5 +212,107 @@ describe("branch-local state reconstruction", () => {
 		assert.equal(reset.revision, 5);
 		assert.equal(reset.checkpoint, undefined);
 		assert.equal(reset.lastOutcome?.kind, "reset");
+	});
+});
+
+
+describe("recovering entry identity for older checkpoints", () => {
+	const messages: LiveContextMessage[] = [
+		{ role: "user", content: "task", timestamp: 1 },
+		{ role: "assistant", content: [{ type: "text", text: "verbose history" }], api: "a", provider: "p", model: "m", usage: { cost: { total: 0 } }, stopReason: "stop", timestamp: 2 },
+		{ role: "user", content: "next", timestamp: 3 },
+	];
+	const branch = [
+		{ id: "entry-1", messages: [messages[0]!] },
+		{ id: "entry-2", messages: [messages[1]!] },
+		{ id: "entry-3", messages: [messages[2]!] },
+	];
+
+	test("a positional-only checkpoint gains the branch's entry ids when the prefix matches", () => {
+		const legacy = createProjectionCheckpoint({
+			revision: 9,
+			sourceMessages: messages,
+			projectedMessages: [{ role: "user", content: "summary", timestamp: 1 }],
+			beforeEstimate: 100,
+			afterEstimate: 10,
+			estimateUnit: "tokens",
+		});
+		assert.equal(legacy.sourceEntries, undefined);
+
+		const healed = attachSourceEntriesFromBranch(legacy, branch);
+		assert.ok(healed, "the branch reproduces the anchored prefix, so identity is recoverable");
+		assert.deepEqual(healed!.sourceEntries!.map((entry) => entry.id), ["entry-1", "entry-2", "entry-3"]);
+
+		// After an undo zeroes one entry, replay is decided by ids instead of discarding.
+		const undone = [
+			{ id: "entry-1", messages: [messages[0]!] },
+			{ id: "edit-4", messages: [] },
+			{ id: "entry-2", messages: [] },
+			{ id: "entry-3", messages: [messages[2]!] },
+		];
+		const replay = reanchorProjection(undone, healed!);
+		assert.equal(replay.valid, true, replay.valid ? "" : replay.reason);
+		if (replay.valid) {
+			assert.deepEqual(replay.deletedEntryIds, []);
+			assert.deepEqual(replay.replacedEntryIds, ["entry-2"]);
+			assert.equal(JSON.stringify(replay.messages).includes("verbose history"), false);
+		}
+	});
+
+	test("identity is not fabricated when the branch does not reproduce the anchored prefix", () => {
+		const legacy = createProjectionCheckpoint({
+			revision: 9,
+			sourceMessages: messages,
+			projectedMessages: [{ role: "user", content: "summary", timestamp: 1 }],
+			beforeEstimate: 100,
+			afterEstimate: 10,
+			estimateUnit: "tokens",
+		});
+		const foreign = [{ id: "entry-1", messages: [{ role: "user", content: "different", timestamp: 1 } as LiveContextMessage] }, ...branch.slice(1)];
+		assert.equal(attachSourceEntriesFromBranch(legacy, foreign), undefined);
+	});
+
+	test("an entry that contributes no messages is never an insertion into the compacted range", () => {
+		const covered = toSourceEntryRefs(branch);
+		const checkpoint = createProjectionCheckpoint({
+			revision: 9,
+			sourceMessages: messages,
+			sourceEntries: covered,
+			projectedMessages: [{ role: "user", content: "summary", timestamp: 1 }],
+			beforeEstimate: 100,
+			afterEstimate: 10,
+			estimateUnit: "tokens",
+		});
+		// A /tree undo of the middle entry appends a context_edit marker between covered entries.
+		const withMarker = [branch[0]!, { id: "edit-4", messages: [] }, branch[1]!, branch[2]!];
+		const replay = reanchorProjection(withMarker, checkpoint);
+		assert.equal(replay.valid, true, replay.valid ? "" : replay.reason);
+		assert.deepEqual(toSourceEntryRefs(withMarker).map((entry) => entry.id), ["entry-1", "entry-2", "entry-3"]);
+	});
+});
+
+describe("a malformed edit trace does not discard the compaction it documents", () => {
+	test("the newest checkpoint still restores when its trace points past the projected output", () => {
+		const stale = createProjectionCheckpoint({
+			revision: 9, sourceMessages: raw.slice(0, 2), projectedMessages: raw.slice(0, 1),
+			beforeEstimate: 900, afterEstimate: 90, estimateUnit: "tokens",
+		});
+		const current = createProjectionCheckpoint({
+			revision: 12, sourceMessages: raw, projectedMessages: raw.slice(0, 2),
+			beforeEstimate: 26_770, afterEstimate: 18_117, estimateUnit: "tokens",
+			// The shape the wrecked seat wrote: provenance with an outputIndex past the output.
+			editTrace: {
+				version: 1, sourceRevision: 11, sourceMessageCount: 128, outputMessageCount: 114,
+				sources: [{ sourceIndex: 5, outputIndex: 300, kind: "kept" }], additions: [],
+			},
+		});
+		const entries = [
+			{ type: "custom", id: "s9", parentId: null, timestamp: "1", customType: LIVE_CONTEXT_STATE, data: { version: 1, enabled: true, revision: 9, checkpoint: stale } },
+			{ type: "custom", id: "s12", parentId: "s9", timestamp: "2", customType: LIVE_CONTEXT_STATE, data: { version: 1, enabled: true, revision: 12, checkpoint: current } },
+		];
+		const restored = reconstructLiveContextState(entries);
+		assert.equal(restored.revision, 12, `the newest compaction must survive a bad trace: got revision ${restored.revision}`);
+		assert.equal(restored.checkpoint?.revision, 12);
+		assert.equal(restored.checkpoint?.editTrace, undefined, "the unusable provenance is dropped, not the compaction");
 	});
 });

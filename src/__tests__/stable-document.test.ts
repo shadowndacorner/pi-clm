@@ -77,7 +77,7 @@ describe("stable document nonce (CLM mode)", () => {
 		assert.equal(escaped, "\\[[CTX_TURN document=x]]\n\\\\[[LIVE_CONTEXT v]]\nplain [[CTX_TURN not at line start");
 		assert.equal(unescapeStructuralLines(escaped), body);
 	});
-	test("a headerless whole-file rewrite is accepted as one notes block after the first user turn", () => {
+	test("a headerless whole-file rewrite keeps every user turn and drops only non-user messages", () => {
 		const withTool: LiveContextMessage[] = [
 			{ role: "user", content: "find the secrets", timestamp: 1 },
 			{ role: "assistant", content: [{ type: "toolCall", id: "c1", name: "read", arguments: {} }], timestamp: 2 },
@@ -88,12 +88,15 @@ describe("stable document nonce (CLM mode)", () => {
 		const summary = "# Context Summary\n## Found so far\n- f01: SECRET=42\n<!-- Budget: 20000/20000 -->";
 		const result = applyContextDocument(summary, snapshot, clm);
 		assert.equal(result.accepted, true);
-		assert.equal(result.messages.length, 2);
+		// Owner turns are never collateral: a headerless rewrite removes tool/assistant
+		// messages only, so both user turns survive.
+		assert.equal(result.messages.length, 3);
 		assert.equal(result.messages[0], withTool[0], "task statement kept verbatim");
-		assert.equal(result.messages[1]!.role, "custom");
-		assert.match(String(result.messages[1]!.content), /\[context role=notes\]\n# Context Summary/);
+		assert.equal(result.messages[1], withTool[3], "newest owner turn kept verbatim");
+		assert.equal(result.messages[2]!.role, "custom");
+		assert.match(String(result.messages[2]!.content), /\[context role=notes\]\n# Context Summary/);
 		assert.match(result.diagnostics.join(" "), /Accepted a headerless rewrite/);
-		assert.deepEqual(result.editTrace?.sources.filter((s) => s.kind === "removed").map((s) => s.sourceIndex), [1, 2, 3]);
+		assert.deepEqual(result.editTrace?.sources.filter((s) => s.kind === "removed").map((s) => s.sourceIndex), [1, 2]);
 		// A pasted metadata line on top of free text is fine too (it is stripped).
 		const withMeta = `${snapshot.text.split("\n")[0]}\n\n${summary}`;
 		assert.equal(applyContextDocument(withMeta, snapshot, clm).accepted, true);
