@@ -64,9 +64,7 @@ function isPersistedRetryError(message: LiveContextMessage): boolean {
 
 /**
  * An assistant turn that came back with no content at all and a provider-side stop reason.
- * The wrecked sessions record exactly this (`content: []`, `stopReason: "aborted"`, zero
- * usage) immediately before the owner reports that the agent stopped mid-reasoning. It is a
- * provider/transport outcome, not a context edit: nothing reached the projection to lose.
+ * This is a provider/transport outcome, not a context edit.
  * Surfacing it separately keeps that distinction visible instead of reading as lost context.
  */
 export function emptyModelResponseReason(message: LiveContextMessage | undefined): "aborted" | "error" | undefined {
