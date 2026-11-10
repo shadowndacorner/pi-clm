@@ -88,6 +88,18 @@ export function isProjectionCheckpoint(value: unknown): value is ProjectionCheck
 		(checkpoint.sourceMessageCount ?? -1) >= 0 &&
 		typeof checkpoint.sourceDigest === "string" &&
 		/^[a-f0-9]{64}$/.test(checkpoint.sourceDigest) &&
+		(checkpoint.sourceEntries === undefined || (
+			Array.isArray(checkpoint.sourceEntries) &&
+			checkpoint.sourceEntries.every((entry) =>
+				Boolean(entry) &&
+				typeof entry.id === "string" &&
+				entry.id.length > 0 &&
+				typeof entry.digest === "string" &&
+				/^[a-f0-9]{64}$/.test(entry.digest) &&
+				Number.isInteger(entry.messageCount) &&
+				entry.messageCount >= 0,
+			)
+		)) &&
 		isMessageArray(checkpoint.projectedMessages) &&
 		typeof checkpoint.beforeEstimate === "number" &&
 		typeof checkpoint.afterEstimate === "number" &&
