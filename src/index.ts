@@ -1773,8 +1773,7 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 	pi.on("turn_end", async (event, ctx) => {
 		// A turn that came back empty with a provider-side stop reason is reported as what it
 		// is. It runs ahead of the enabled/store guards because it is not a context outcome: the
-		// wrecked sessions show these turns arriving before CLM ever saw them, and a silent stall
-		// otherwise reads as the extension having dropped the instruction.
+		// provider returned no content to project.
 		const emptyReason = emptyModelResponseReason((event as unknown as { message?: LiveContextMessage }).message);
 		if (emptyReason) {
 			emptyModelResponses += 1;
