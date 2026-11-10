@@ -9,21 +9,7 @@ import { LIVE_CONTEXT_STATE } from "../state.ts";
 import type { ProjectionCheckpoint } from "../projection.ts";
 import type { LiveContextMessage } from "../types.ts";
 
-/**
- * Reproduces the wrecked redmer seat
- * (`2026-11-09T12-16-20-442Z_01a1c03c…jsonl`, lines 1061 and 1064: two `context_edit`
- * entries with `replacement: null`).
- *
- * These tests differ from `tree-undo-coupling.test.ts` in one detail that matters: they
- * mirror pi 1.3.0's `buildSessionProjection()` exactly. A `context_edit` entry is a real
- * session entry on the branch — it appears in `buildContextEntries()` / `buildSessionProjection()
- * .entries` and contributes zero messages (`sessionEntryToContextMessages` falls through to
- * `[]`, and a null `replacement` zeroes the target's messages). CLM's re-anchoring treats any
- * uncovered entry inside the compacted range as an unrecoverable insertion, so every undo of
- * an already-compacted message destroyed the compaction: the provider then answered 400
- * "request exceeds the context window: prompt (104943 tokens) leaves no room to answer in the
- * context (98304)" while CLM's own meter kept quoting the projection it no longer applied.
- */
+/** Regression coverage for context_edit entries during Pi session projection. */
 
 type Handler = (event: any, context: any) => any;
 
@@ -66,8 +52,8 @@ function conversation(): any[] {
 	push(assistant("entry-2", `First pass\n${"large investigation output\n".repeat(120)}`, 2));
 	push(user("entry-3", "Anything else?", 3));
 	push(assistant("entry-4", "No, the parser is the only relevant file.", 4));
-	push(user("entry-5", "Now flip the treebug session vertically.", 5));
-	push(assistant("entry-6", "Sure, flipping both sessions vertically now.", 6));
+	push(user("entry-5", "Now test another parser input.", 5));
+	push(assistant("entry-6", "Testing the additional parser input.", 6));
 	return entries;
 }
 
@@ -234,8 +220,7 @@ async function buildCompactedBranch(options: { stripEntryIdentity?: boolean } = 
 	await emit(harness, "session_shutdown", { type: "session_shutdown", reason: "quit" });
 
 	if (options.stripEntryIdentity) {
-		// The wrecked seat's checkpoints were written before entry identity existed: they
-		// carry sourceMessageCount + digest only.
+		// Legacy checkpoints carry sourceMessageCount and digest without entry identity.
 		for (const entry of harness.branch) {
 			if (entry.customType !== LIVE_CONTEXT_STATE) continue;
 			if (entry.data?.checkpoint) delete entry.data.checkpoint.sourceEntries;
@@ -300,9 +285,7 @@ describe("/tree undo against pi's real session projection", () => {
 		const sent = result[0]?.messages as LiveContextMessage[] | undefined;
 		const sentJson = JSON.stringify(sent ?? raw);
 
-		// The provider rejected the wrecked seat at 104943 prompt tokens against a 98304
-		// window: the request had become the raw transcript. An identity-less checkpoint may
-		// not turn into a raw send.
+		// An identity-less checkpoint must not fall back to sending the raw transcript.
 		assert.doesNotMatch(
 			sentJson,
 			/large investigation output/,
