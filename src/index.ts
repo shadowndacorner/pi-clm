@@ -72,8 +72,10 @@ import {
 } from "./presentation.ts";
 import {
 	applyProjection,
+	attachSourceEntriesFromBranch,
 	type BranchEntryLike,
 	createProjectionCheckpoint,
+	emptyModelResponseReason,
 	PROJECTION_NO_ENTRY_IDENTITY_REASON,
 	PROJECTION_PREFIX_MISMATCH_REASON,
 	reanchorProjection,
@@ -269,6 +271,7 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 	let sizeTrailer = editingMode === "clm" && options.sizeTrailer === true;
 	let toolCallsThisTurn = 0;
 	let maxTokensLifts = 0;
+	let emptyModelResponses = 0;
 	let nativeCompaction = options.nativeCompaction ?? "auto";
 	let steering: SteeringDocument | undefined;
 	let steeringError: string | undefined;
@@ -736,6 +739,43 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 			entries.push({ id, messages: Array.isArray(entry.messages) ? (entry.messages as LiveContextMessage[]) : [] });
 		}
 		return entries;
+	}
+
+	/**
+	 * The branch as Pi stores it, before `context_edit` entries rewrite it: each entry's original
+	 * messages. A `/tree` undo keeps the undone entry (and its content) in the journal and zeroes
+	 * it only in the projection, so this view is what reproduces a checkpoint's original prefix
+	 * digest — which is how a checkpoint written without entry identity can recover that identity.
+	 * Returns undefined when the branch holds content this view cannot reproduce exactly.
+	 */
+	function uneditedBranchEntries(ctx: ExtensionContext): BranchEntryLike[] | undefined {
+		const manager = ctx.sessionManager as unknown as { getBranch?: () => unknown[] };
+		if (typeof manager.getBranch !== "function") return undefined;
+		let entries: unknown[];
+		try {
+			entries = manager.getBranch();
+		} catch {
+			return undefined;
+		}
+		if (!Array.isArray(entries)) return undefined;
+		const view: BranchEntryLike[] = [];
+		for (const entry of entries) {
+			const record = entry as { id?: unknown; type?: unknown; message?: unknown };
+			if (typeof record?.id !== "string" || record.id.length === 0) continue;
+			if (record.type === "message" && record.message) {
+				view.push({ id: record.id, messages: [record.message as LiveContextMessage] });
+				continue;
+			}
+			// Anything that contributes context through a path other than a plain message entry
+			// (compaction summaries, custom messages) cannot be re-derived here, so do not guess.
+			if (record.type === "session" || record.type === "context_edit" || record.type === "custom"
+				|| record.type === "model_change" || record.type === "thinking_level_change"
+				|| record.type === "usage" || record.type === "label" || record.type === "session_info") {
+				continue;
+			}
+			return undefined;
+		}
+		return view;
 	}
 
 	/** Entry refs for the raw prefix a new checkpoint anchors to. */
@@ -1396,14 +1436,23 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 			// prefix mismatch is not evidence that the managed compaction is stale. Replay the
 			// checkpoint onto the live branch first; the positional digest stays as the fast path.
 			const branch = branchEntries(ctx);
+			// A checkpoint from an older build anchored only a positional prefix. Recover its entry
+			// identity from the live branch before deciding the compaction is unreplayable, so a
+			// `/tree` undo cannot turn into an oversized raw send.
+			const identity = attachSourceEntriesFromBranch(target, uneditedBranchEntries(ctx) ?? []);
+			if (identity) state.checkpoint = identity;
+			const replayTarget = identity ?? target;
+			// Pi's `/tree` undo changes the raw prefix without changing entry identity, so a
+			// prefix mismatch is not evidence that the managed compaction is stale. Replay the
+			// checkpoint onto the live branch first; the positional digest stays as the fast path.
 			const replay = branch && branch.length > 0
-				? reanchorProjection(branch, target)
+				? reanchorProjection(branch, replayTarget)
 				: { valid: false as const, reason: PROJECTION_NO_ENTRY_IDENTITY_REASON };
 			if (replay.valid) {
 				reanchored = replay;
 				projection = { valid: true, messages: replay.messages, suffix: replay.suffix };
 			} else {
-				const recovery = recoverProjectionFromRetryErrors(rawMessages, target, checkpointHistory);
+				const recovery = recoverProjectionFromRetryErrors(rawMessages, replayTarget, checkpointHistory);
 				if (recovery.valid) {
 					rebaseRecoveredProjection(ctx, rawMessages, target, recovery);
 					projection = recovery;
@@ -1722,6 +1771,16 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 	});
 
 	pi.on("turn_end", async (event, ctx) => {
+		// A turn that came back empty with a provider-side stop reason is reported as what it
+		// is. It runs ahead of the enabled/store guards because it is not a context outcome: the
+		// provider returned no content to project.
+		const emptyReason = emptyModelResponseReason((event as unknown as { message?: LiveContextMessage }).message);
+		if (emptyReason) {
+			emptyModelResponses += 1;
+			const count = emptyModelResponses > 1 ? ` (${emptyModelResponses} such turns this session)` : "";
+			const cause = emptyReason === "aborted" ? "the provider aborted the response" : "the provider errored the response";
+			ctx.ui.notify(`The model returned an empty response: ${cause}${count}. No context edit was involved - retry the turn.`, "warning");
+		}
 		if (!state.enabled || !store) return;
 		captureObservedUsage(ctx);
 		if (!turnBaseline) return;

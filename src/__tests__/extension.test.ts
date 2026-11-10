@@ -1602,3 +1602,39 @@ describe("pi-clm entry point", () => {
 		} finally { await emit(harness, "session_shutdown", {}); }
 	});
 });
+
+describe("empty model response notices", () => {
+	test("a turn that comes back empty is reported as a provider outcome, not a context loss", async () => {
+		const harness = createHarness();
+		liveContextExtension(harness.pi);
+		await emit(harness, "session_start", { type: "session_start", reason: "startup" });
+		const noticeCount = () => harness.notifications.length;
+
+		const emptyAborted = { role: "assistant", content: [], api: "test", provider: "strata", model: "m", usage: { cost: { total: 0 } }, stopReason: "aborted", timestamp: 1 };
+		const before = noticeCount();
+		await emit(harness, "turn_end", { type: "turn_end", message: emptyAborted, toolResults: [] });
+		assert.ok(noticeCount() > before, "expected a notice for the empty turn");
+		assert.match(harness.notifications.at(-1)!, /The model returned an empty response: the provider aborted the response/);
+		assert.match(harness.notifications.at(-1)!, /No context edit was involved/);
+
+		// Repeats are counted, so a stall that keeps happening is visible as a pattern.
+		await emit(harness, "turn_end", { type: "turn_end", message: { ...emptyAborted, timestamp: 2 }, toolResults: [] });
+		assert.match(harness.notifications.at(-1)!, /\(2 such turns this session\)/);
+
+		// An aborted turn whose only part is an empty string is empty in every sense that
+		// matters to the owner, so it counts too; a turn that stopped on a tool call does not.
+		const emptyNotices = () => harness.notifications.filter((n) => /empty response/.test(n)).length;
+		await emit(harness, "turn_end", {
+			type: "turn_end",
+			message: { role: "assistant", content: [{ type: "text", text: "   " }], stopReason: "aborted", timestamp: 3 },
+			toolResults: [],
+		});
+		await emit(harness, "turn_end", {
+			type: "turn_end",
+			message: { role: "assistant", content: [{ type: "toolCall", id: "t1", name: "read", arguments: {} }], stopReason: "toolUse", timestamp: 4 },
+			toolResults: [],
+		});
+		assert.equal(emptyNotices(), 3, "expected the tool-call turn to stay silent about emptiness");
+		await emit(harness, "session_shutdown", {});
+	});
+});

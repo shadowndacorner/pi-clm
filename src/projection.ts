@@ -62,6 +62,27 @@ function isPersistedRetryError(message: LiveContextMessage): boolean {
 	return message.role === "assistant" && message.stopReason === "error";
 }
 
+/**
+ * An assistant turn that came back with no content at all and a provider-side stop reason.
+ * This is a provider/transport outcome, not a context edit.
+ * Surfacing it separately keeps that distinction visible instead of reading as lost context.
+ */
+export function emptyModelResponseReason(message: LiveContextMessage | undefined): "aborted" | "error" | undefined {
+	if (!message || message.role !== "assistant") return undefined;
+	const stopReason = message.stopReason;
+	if (stopReason !== "aborted" && stopReason !== "error") return undefined;
+	const content = Array.isArray(message.content) ? message.content : [];
+	const carriesPayload = content.some((part) => {
+		if (part === null || part === undefined || typeof part !== "object") return true;
+		const record = part as Record<string, unknown>;
+		if (record.type === "text") return typeof record.text === "string" && record.text.trim() !== "";
+		if (record.type === "thinking") return typeof record.thinking === "string" && record.thinking.trim() !== "";
+		return true;
+	});
+	if (carriesPayload) return undefined;
+	return stopReason;
+}
+
 export function createProjectionCheckpoint(options: {
 	revision: number;
 	sourceMessages: LiveContextMessage[];
@@ -217,7 +238,11 @@ export interface BranchEntryLike {
 
 export function toSourceEntryRefs(entries: BranchEntryLike[]): ProjectionSourceEntry[] {
 	return entries
-		.filter((entry) => typeof entry.id === "string" && entry.id.length > 0)
+		// An entry that contributes no messages carries no context. In pi that is a
+		// `context_edit` marker (a `/tree` undo, or an externally rewritten entry): it occupies a
+		// slot on the branch while adding nothing to the request, so it must never count as part
+		// of, or as an insertion into, the compacted range.
+		.filter((entry) => typeof entry.id === "string" && entry.id.length > 0 && entry.messages.length > 0)
 		.map((entry) => ({
 			id: entry.id,
 			digest: digestMessages(entry.messages),
@@ -237,6 +262,39 @@ export type ProjectionReanchoring =
 
 export const PROJECTION_NO_ENTRY_IDENTITY_REASON =
 	"Projection checkpoint has no session-entry identity, so it cannot be replayed onto this branch.";
+
+/**
+ * Recover session-entry identity for a checkpoint written before CLM recorded it.
+ *
+ * Checkpoints from older builds anchor only a positional raw prefix, so any `/tree`
+ * navigation invalidates that anchor and the projection used to be discarded outright — which
+ * sent the whole raw transcript to the provider (HTTP 400 "request exceeds the context
+ * window") while CLM's own meter kept quoting the compaction it no longer applied. When the
+ * live branch still reproduces the anchored prefix message-for-message, that branch's stable
+ * entry ids are exactly the ids the prefix was built from, so the checkpoint becomes
+ * replayable across later `/tree` navigation instead of being thrown away.
+ */
+export function attachSourceEntriesFromBranch(
+	checkpoint: ProjectionCheckpoint,
+	branchEntries: BranchEntryLike[],
+): ProjectionCheckpoint | undefined {
+	if (checkpoint.sourceEntries && checkpoint.sourceEntries.length > 0) return undefined;
+	const refs = toSourceEntryRefs(branchEntries);
+	if (refs.length === 0) return undefined;
+
+	const covered: ProjectionSourceEntry[] = [];
+	const sourceMessages: LiveContextMessage[] = [];
+	for (const ref of refs) {
+		if (sourceMessages.length + ref.messageCount > checkpoint.sourceMessageCount) return undefined;
+		const entry = branchEntries.find((candidate) => candidate.id === ref.id)!;
+		covered.push(ref);
+		sourceMessages.push(...entry.messages);
+		if (sourceMessages.length === checkpoint.sourceMessageCount) break;
+	}
+	if (sourceMessages.length !== checkpoint.sourceMessageCount) return undefined;
+	if (digestMessages(sourceMessages) !== checkpoint.sourceDigest) return undefined;
+	return { ...checkpoint, sourceEntries: covered };
+}
 
 /**
  * Replay a checkpoint onto the branch that is actually live.
@@ -329,6 +387,10 @@ export function reanchorProjection(
 		const entry = branchEntries[index];
 		const source = coveredByIndex.get(index);
 		if (!source) {
+			// A `/tree` undo appends a `context_edit` entry that contributes no messages. It is
+			// not context and must not be mistaken for new content inserted inside the compacted
+			// range, which previously discarded the compaction and sent the raw transcript.
+			if (entry.messages.length === 0) continue;
 			if (index < lastCoveredIndex) {
 				return {
 					valid: false,
