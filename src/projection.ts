@@ -62,6 +62,29 @@ function isPersistedRetryError(message: LiveContextMessage): boolean {
 	return message.role === "assistant" && message.stopReason === "error";
 }
 
+/**
+ * An assistant turn that came back with no content at all and a provider-side stop reason.
+ * The wrecked sessions record exactly this (`content: []`, `stopReason: "aborted"`, zero
+ * usage) immediately before the owner reports that the agent stopped mid-reasoning. It is a
+ * provider/transport outcome, not a context edit: nothing reached the projection to lose.
+ * Surfacing it separately keeps that distinction visible instead of reading as lost context.
+ */
+export function emptyModelResponseReason(message: LiveContextMessage | undefined): "aborted" | "error" | undefined {
+	if (!message || message.role !== "assistant") return undefined;
+	const stopReason = message.stopReason;
+	if (stopReason !== "aborted" && stopReason !== "error") return undefined;
+	const content = Array.isArray(message.content) ? message.content : [];
+	const carriesPayload = content.some((part) => {
+		if (part === null || part === undefined || typeof part !== "object") return true;
+		const record = part as Record<string, unknown>;
+		if (record.type === "text") return typeof record.text === "string" && record.text.trim() !== "";
+		if (record.type === "thinking") return typeof record.thinking === "string" && record.thinking.trim() !== "";
+		return true;
+	});
+	if (carriesPayload) return undefined;
+	return stopReason;
+}
+
 export function createProjectionCheckpoint(options: {
 	revision: number;
 	sourceMessages: LiveContextMessage[];

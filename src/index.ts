@@ -75,6 +75,7 @@ import {
 	attachSourceEntriesFromBranch,
 	type BranchEntryLike,
 	createProjectionCheckpoint,
+	emptyModelResponseReason,
 	PROJECTION_NO_ENTRY_IDENTITY_REASON,
 	PROJECTION_PREFIX_MISMATCH_REASON,
 	reanchorProjection,
@@ -270,6 +271,7 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 	let sizeTrailer = editingMode === "clm" && options.sizeTrailer === true;
 	let toolCallsThisTurn = 0;
 	let maxTokensLifts = 0;
+	let emptyModelResponses = 0;
 	let nativeCompaction = options.nativeCompaction ?? "auto";
 	let steering: SteeringDocument | undefined;
 	let steeringError: string | undefined;
@@ -1769,6 +1771,17 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 	});
 
 	pi.on("turn_end", async (event, ctx) => {
+		// A turn that came back empty with a provider-side stop reason is reported as what it
+		// is. It runs ahead of the enabled/store guards because it is not a context outcome: the
+		// wrecked sessions show these turns arriving before CLM ever saw them, and a silent stall
+		// otherwise reads as the extension having dropped the instruction.
+		const emptyReason = emptyModelResponseReason((event as unknown as { message?: LiveContextMessage }).message);
+		if (emptyReason) {
+			emptyModelResponses += 1;
+			const count = emptyModelResponses > 1 ? ` (${emptyModelResponses} such turns this session)` : "";
+			const cause = emptyReason === "aborted" ? "the provider aborted the response" : "the provider errored the response";
+			ctx.ui.notify(`The model returned an empty response: ${cause}${count}. No context edit was involved - retry the turn.`, "warning");
+		}
 		if (!state.enabled || !store) return;
 		captureObservedUsage(ctx);
 		if (!turnBaseline) return;
