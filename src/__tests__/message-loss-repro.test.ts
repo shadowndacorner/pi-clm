@@ -4,12 +4,10 @@ import { describe, test } from "node:test";
 import { applyContextDocument, renderContextDocument } from "../context-document.ts";
 import type { LiveContextMessage } from "../types.ts";
 
-// The manager-session failure shape: an owner instruction is followed by an assistant
-// turn that reasons "the user hasn't asked anything substantive yet" and stops. The
-// owner's message was never in the assembled request.
+// Synthetic regression scenario: preserve later user instructions after collapse.
 function conversation(): LiveContextMessage[] {
 	return [
-		{ role: "user", content: "Set up the seat layout.", timestamp: 1 },
+		{ role: "user", content: "Prepare the example document.", timestamp: 1 },
 		{
 			role: "assistant",
 			content: [{ type: "text", text: `Old investigation\n${"large output\n".repeat(120)}` }],
@@ -22,7 +20,7 @@ function conversation(): LiveContextMessage[] {
 		},
 		{
 			role: "user",
-			content: "Can you flip the treebug and context-trees sessions vertically? I want context trees on top.",
+			content: "Can you sort the example items alphabetically? Use ascending order.",
 			timestamp: 3,
 		},
 		{
@@ -38,7 +36,7 @@ function conversation(): LiveContextMessage[] {
 	];
 }
 
-const INSTRUCTION = "Can you flip the treebug and context-trees sessions vertically?";
+const INSTRUCTION = "Can you sort the example items alphabetically?";
 
 function snapshotOf(messages: LiveContextMessage[]) {
 	return renderContextDocument(messages, { revision: 1 });
@@ -49,7 +47,7 @@ describe("user turns survive a mirror collapse", () => {
 		const messages = conversation();
 		const snapshot = snapshotOf(messages);
 		// The model replaces its whole context with free text (the paper's collapse move).
-		const edited = "Working notes: seat layout work, two sessions to stack vertically.\n";
+		const edited = "Working notes: prepare and sort the example document.\n";
 
 		const result = applyContextDocument(edited, snapshot, { editingMode: "clm" });
 
