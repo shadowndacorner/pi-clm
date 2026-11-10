@@ -532,10 +532,7 @@ export function applyContextDocument(
 	// CLM: a file with no current block headers at all is the model replacing its whole
 	// context with free text (the paper's "collapse to a summary" move). Accept it as one
 	// notes block, but keep every owner (user) turn: a collapse may summarise everything the
-	// model has already seen, never the instructions the owner gave. Deleting them is the
-	// message-loss defect - the next request carries no recent instruction, so the model
-	// confabulates that nothing was asked and the turn ends empty. The wrecked seat recorded
-	// exactly this in its own provenance: `kept: 1, removed: 180`, with 10 user turns removed.
+	// model has already seen, never the instructions the owner gave.
 	if (options.editingMode === "clm" && parsed.blocks.length === 0 && editedText.trim().length > 0) {
 		const body = unescapeStructuralLines(
 			editedText
