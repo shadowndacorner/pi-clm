@@ -10,7 +10,7 @@ import type { LiveContextMessage } from "../types.ts";
 
 /** Synthetic regression coverage for headerless whole-file context rewrites. */
 const messages = JSON.parse(
-	readFileSync(join(import.meta.dirname, "fixtures", "journal-01a1c286-window.json"), "utf8"),
+	readFileSync(join(import.meta.dirname, "fixtures", "synthetic-headerless-window.json"), "utf8"),
 ) as LiveContextMessage[];
 
 describe("synthetic headerless whole-file rewrite", () => {
