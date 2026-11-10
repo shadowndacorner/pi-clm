@@ -4,11 +4,25 @@ import type { ContextEditTrace, LiveContextMessage } from "./types.ts";
 export const PROJECTION_PREFIX_MISMATCH_REASON =
 	"Raw context prefix no longer matches the projection checkpoint.";
 
+/**
+ * Identity of one session entry covered by a checkpoint, taken from Pi's own entry tree
+ * (`SessionManager.buildSessionProjection()`). Entry ids survive `/tree` navigation and
+ * `context_edit` entries, while a positional raw prefix does not: anchoring to ids is what
+ * lets a compaction be replayed onto a different active branch instead of being discarded.
+ */
+export interface ProjectionSourceEntry {
+	id: string;
+	digest: string;
+	messageCount: number;
+}
+
 export interface ProjectionCheckpoint {
 	version: 1;
 	revision: number;
 	sourceMessageCount: number;
 	sourceDigest: string;
+	/** Bounded prefix of the raw source covered by entry identity (see above). */
+	sourceEntries?: ProjectionSourceEntry[];
 	projectedMessages: LiveContextMessage[];
 	beforeEstimate: number;
 	afterEstimate: number;
@@ -51,6 +65,7 @@ function isPersistedRetryError(message: LiveContextMessage): boolean {
 export function createProjectionCheckpoint(options: {
 	revision: number;
 	sourceMessages: LiveContextMessage[];
+	sourceEntries?: ProjectionSourceEntry[];
 	projectedMessages: LiveContextMessage[];
 	beforeEstimate: number;
 	afterEstimate: number;
@@ -63,6 +78,7 @@ export function createProjectionCheckpoint(options: {
 		revision: options.revision,
 		sourceMessageCount: options.sourceMessages.length,
 		sourceDigest: digestMessages(options.sourceMessages),
+		sourceEntries: options.sourceEntries,
 		projectedMessages: [...options.projectedMessages],
 		beforeEstimate: options.beforeEstimate,
 		afterEstimate: options.afterEstimate,
@@ -190,5 +206,150 @@ export function recoverProjectionFromRetryErrors(
 	return {
 		valid: false,
 		reason: direct.reason,
+	};
+}
+
+/** A session entry as the live branch presents it: stable id plus the messages it contributes. */
+export interface BranchEntryLike {
+	id: string;
+	messages: LiveContextMessage[];
+}
+
+export function toSourceEntryRefs(entries: BranchEntryLike[]): ProjectionSourceEntry[] {
+	return entries
+		.filter((entry) => typeof entry.id === "string" && entry.id.length > 0)
+		.map((entry) => ({
+			id: entry.id,
+			digest: digestMessages(entry.messages),
+			messageCount: entry.messages.length,
+		}));
+}
+
+export type ProjectionReanchoring =
+	| {
+			valid: true;
+			messages: LiveContextMessage[];
+			suffix: LiveContextMessage[];
+			deletedEntryIds: string[];
+			replacedEntryIds: string[];
+	  }
+	| { valid: false; reason: string };
+
+export const PROJECTION_NO_ENTRY_IDENTITY_REASON =
+	"Projection checkpoint has no session-entry identity, so it cannot be replayed onto this branch.";
+
+/**
+ * Replay a checkpoint onto the branch that is actually live.
+ *
+ * The checkpoint's positional prefix digest is a fast path, not the source of truth: Pi's
+ * `/tree` navigation records `context_edit` entries and re-roots the tree, so the same
+ * managed compaction can be reached from a raw transcript whose prefix differs. Entry ids
+ * are the durable identity, so replay is decided by them:
+ *
+ *  - a covered entry that is gone from the branch (a `/tree` undo, whose `replacement` is
+ *    null) contributes nothing: it stays out of the sent context and the rest of the
+ *    compaction is kept;
+ *  - a covered entry whose content changed in place cannot be re-summarized here, so its
+ *    raw messages are sent instead and reported as `replacedEntryIds`;
+ *  - a branch that inserts entries inside the compacted range cannot be replayed at all:
+ *    that fails closed rather than falling back to the raw transcript.
+ */
+/** Remove the first contiguous window of `size` projected messages hashing to `digest`. */
+function removeWindow(messages: LiveContextMessage[], digest: string, size: number): boolean {
+	for (let start = 0; start + size <= messages.length; start++) {
+		if (digestMessages(messages.slice(start, start + size)) !== digest) continue;
+		messages.splice(start, size);
+		return true;
+	}
+	return false;
+}
+
+export function reanchorProjection(
+	branchEntries: BranchEntryLike[],
+	checkpoint: ProjectionCheckpoint | undefined,
+): ProjectionReanchoring {
+	if (!checkpoint) return { valid: true, messages: [], suffix: [], deletedEntryIds: [], replacedEntryIds: [] };
+	const covered = checkpoint.sourceEntries;
+	if (!covered || covered.length === 0) {
+		return { valid: false, reason: PROJECTION_NO_ENTRY_IDENTITY_REASON };
+	}
+
+	const positions = new Map<string, number>();
+	branchEntries.forEach((entry, index) => {
+		if (!positions.has(entry.id)) positions.set(entry.id, index);
+	});
+
+	let previousCoveredIndex = -1;
+	const coveredIndexes: number[] = [];
+	const deletedEntryIds: string[] = [];
+	for (const entry of covered) {
+		const index = positions.get(entry.id);
+		if (index === undefined) {
+			deletedEntryIds.push(entry.id);
+			continue;
+		}
+		if (index <= previousCoveredIndex) {
+			return {
+				valid: false,
+				reason: `Session entry ${entry.id} moved inside the compacted range, so the projection cannot be replayed.`,
+			};
+		}
+		previousCoveredIndex = index;
+		coveredIndexes.push(index);
+	}
+	if (deletedEntryIds.length === covered.length) {
+		return {
+			valid: false,
+			reason: "No session entry covered by the projection is present on this branch, so it cannot be replayed.",
+		};
+	}
+	const lastCoveredIndex = coveredIndexes.at(-1) ?? -1;
+
+	const suffix: LiveContextMessage[] = [];
+	const replacedEntryIds: string[] = [];
+	const coveredByIndex = new Map<number, ProjectionSourceEntry>();
+	covered.forEach((entry, order) => {
+		const index = positions.get(entry.id);
+		if (index !== undefined) coveredByIndex.set(index, entry);
+		void order;
+	});
+
+	const output = [...checkpoint.projectedMessages];
+	// A covered entry that left the branch was undone (a `/tree` undo records a null
+	// `context_edit`). Any projected copy of its exact messages goes with it; a message the
+	// projection had already rewritten stays, because the summary is CLM-managed context and
+	// re-summarizing is what the next compaction round is for.
+	for (const id of deletedEntryIds) {
+		const source = covered.find((entry) => entry.id === id);
+		if (!source || source.messageCount === 0) continue;
+		removeWindow(output, source.digest, source.messageCount);
+	}
+
+	for (let index = 0; index < branchEntries.length; index++) {
+		const entry = branchEntries[index];
+		const source = coveredByIndex.get(index);
+		if (!source) {
+			if (index < lastCoveredIndex) {
+				return {
+					valid: false,
+					reason: `Session entry ${entry.id} was inserted inside the compacted range, so the projection cannot be replayed.`,
+				};
+			}
+			suffix.push(...entry.messages);
+			continue;
+		}
+		if (digestMessages(entry.messages) !== source.digest) {
+			replacedEntryIds.push(entry.id);
+			removeWindow(output, source.digest, source.messageCount);
+			suffix.push(...entry.messages);
+		}
+	}
+
+	return {
+		valid: true,
+		messages: [...output, ...suffix],
+		suffix,
+		deletedEntryIds,
+		replacedEntryIds,
 	};
 }

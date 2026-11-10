@@ -72,11 +72,17 @@ import {
 } from "./presentation.ts";
 import {
 	applyProjection,
+	type BranchEntryLike,
 	createProjectionCheckpoint,
+	PROJECTION_NO_ENTRY_IDENTITY_REASON,
 	PROJECTION_PREFIX_MISMATCH_REASON,
+	reanchorProjection,
 	recoverProjectionFromRetryErrors,
 	type ProjectionCheckpoint,
 	type ProjectionRecovery,
+	type ProjectionReanchoring,
+	type ProjectionSourceEntry,
+	toSourceEntryRefs,
 } from "./projection.ts";
 import {
 	LIVE_CONTEXT_STATE,
@@ -704,6 +710,48 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 		stickyNoticeRepeats = STICKY_NOTICE_REPEATS;
 	}
 
+	/**
+	 * The live branch as Pi sees it: stable entry ids plus the messages each entry currently
+	 * contributes (a `context_edit` with a null replacement contributes none). Pi's tree
+	 * navigation keeps these ids, which is what makes a compaction replayable across `/tree`.
+	 */
+	function branchEntries(ctx: ExtensionContext): BranchEntryLike[] | undefined {
+		const manager = ctx.sessionManager as unknown as {
+			buildSessionProjection?: () => {
+				entries?: Array<{ sourceEntry?: { id?: unknown }; messages?: unknown }>;
+			};
+		};
+		if (typeof manager.buildSessionProjection !== "function") return undefined;
+		let projection: { entries?: Array<{ sourceEntry?: { id?: unknown }; messages?: unknown }> };
+		try {
+			projection = manager.buildSessionProjection();
+		} catch {
+			return undefined;
+		}
+		if (!Array.isArray(projection?.entries)) return undefined;
+		const entries: BranchEntryLike[] = [];
+		for (const entry of projection.entries) {
+			const id = entry?.sourceEntry?.id;
+			if (typeof id !== "string" || id.length === 0) continue;
+			entries.push({ id, messages: Array.isArray(entry.messages) ? (entry.messages as LiveContextMessage[]) : [] });
+		}
+		return entries;
+	}
+
+	/** Entry refs for the raw prefix a new checkpoint anchors to. */
+	function coveredSourceEntries(ctx: ExtensionContext, rawMessages: LiveContextMessage[]): ProjectionSourceEntry[] | undefined {
+		const branch = branchEntries(ctx);
+		if (!branch) return undefined;
+		const covered: ProjectionSourceEntry[] = [];
+		let count = 0;
+		for (const ref of toSourceEntryRefs(branch)) {
+			if (count + ref.messageCount > rawMessages.length) break;
+			covered.push(ref);
+			count += ref.messageCount;
+		}
+		return covered.length > 0 ? covered : undefined;
+	}
+
 	function findHistoricalRecovery(rawMessages: LiveContextMessage[]): {
 		target: ProjectionCheckpoint;
 		recovery: Extract<ProjectionRecovery, { valid: true }>;
@@ -722,6 +770,7 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 	}
 
 	function rebaseRecoveredProjection(
+		ctx: ExtensionContext,
 		rawMessages: LiveContextMessage[],
 		target: ProjectionCheckpoint,
 		recovery: Extract<ProjectionRecovery, { valid: true }>,
@@ -740,6 +789,7 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 		const checkpoint = createProjectionCheckpoint({
 			revision,
 			sourceMessages: rawMessages,
+			sourceEntries: coveredSourceEntries(ctx, rawMessages),
 			projectedMessages: recovery.messages,
 			beforeEstimate: beforeTokens,
 			afterEstimate: afterTokens,
@@ -1338,22 +1388,84 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 		let suffixMessages: LiveContextMessage[] = [];
 		let projection = applyProjection(rawMessages, state.checkpoint);
 		let recovered = false;
+		let reanchored: Extract<ProjectionReanchoring, { valid: true }> | undefined;
 
 		if (!projection.valid && state.checkpoint) {
 			const target = state.checkpoint;
-			const recovery = recoverProjectionFromRetryErrors(rawMessages, target, checkpointHistory);
-			if (recovery.valid) {
-				rebaseRecoveredProjection(rawMessages, target, recovery);
-				projection = recovery;
-				recovered = true;
+			// Pi's `/tree` undo changes the raw prefix without changing entry identity, so a
+			// prefix mismatch is not evidence that the managed compaction is stale. Replay the
+			// checkpoint onto the live branch first; the positional digest stays as the fast path.
+			const branch = branchEntries(ctx);
+			const replay = branch && branch.length > 0
+				? reanchorProjection(branch, target)
+				: { valid: false as const, reason: PROJECTION_NO_ENTRY_IDENTITY_REASON };
+			if (replay.valid) {
+				reanchored = replay;
+				projection = { valid: true, messages: replay.messages, suffix: replay.suffix };
+			} else {
+				const recovery = recoverProjectionFromRetryErrors(rawMessages, target, checkpointHistory);
+				if (recovery.valid) {
+					rebaseRecoveredProjection(ctx, rawMessages, target, recovery);
+					projection = recovery;
+					recovered = true;
+				}
 			}
 		} else if (!state.checkpoint) {
 			const historical = findHistoricalRecovery(rawMessages);
 			if (historical) {
-				rebaseRecoveredProjection(rawMessages, historical.target, historical.recovery);
+				rebaseRecoveredProjection(ctx, rawMessages, historical.target, historical.recovery);
 				projection = historical.recovery;
 				recovered = true;
 			}
+		}
+
+		if (reanchored && state.checkpoint) {
+			const target = state.checkpoint;
+			const rebased = createProjectionCheckpoint({
+				revision: state.revision + 1,
+				sourceMessages: rawMessages,
+				sourceEntries: coveredSourceEntries(ctx, rawMessages),
+				projectedMessages: reanchored.messages,
+				beforeEstimate: estimateLiveContextTokens(selectContextVisibleMessages(rawMessages)),
+				afterEstimate: estimateLiveContextTokens(selectContextVisibleMessages(reanchored.messages)),
+				estimateUnit: "tokens",
+			});
+			const details = [
+				reanchored.deletedEntryIds.length > 0
+					? `dropped ${reanchored.deletedEntryIds.length} undone session entr${reanchored.deletedEntryIds.length === 1 ? "y" : "ies"}`
+					: "",
+				reanchored.replacedEntryIds.length > 0
+					? `sent raw content for ${reanchored.replacedEntryIds.length} rewritten session entr${reanchored.replacedEntryIds.length === 1 ? "y" : "ies"}`
+					: "",
+			].filter(Boolean);
+			const message =
+				`Re-anchored projection revision ${target.revision} onto the current branch` +
+				(details.length > 0 ? `; ${details.join(" and ")}` : "") +
+				` as revision ${rebased.revision}.`;
+			persist({
+				version: 1,
+				enabled: state.enabled,
+				revision: rebased.revision,
+				checkpoint: rebased,
+				lastOutcome: {
+					kind: "applied",
+					message,
+					beforeEstimate: rebased.beforeEstimate,
+					afterEstimate: rebased.afterEstimate,
+					estimateUnit: "tokens",
+					at: rebased.createdAt,
+				},
+			});
+			awaitObservationForRevision = rebased.revision;
+			if (reanchored.replacedEntryIds.length > 0) {
+				ctx.ui.notify(
+					`pi-clm: the live context could not be re-anchored exactly: session entries` +
+					` ${reanchored.replacedEntryIds.join(", ")} changed in place, so their raw content was sent instead` +
+					" of the compacted version.",
+					"warning",
+				);
+			}
+			queueOutcomeNotice(message);
 		}
 
 		if (projection.valid) {
@@ -1366,6 +1478,18 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 		} else {
 			invalidationStreak += 1;
 			persist(resetProjectionState(state, projection.reason));
+			// The meter must follow the history that is actually sent: a reading taken from the
+			// dropped projection would keep quoting a context that no longer exists.
+			lastBudgetReading = undefined;
+			currentContextView = undefined;
+			observedUsage = undefined;
+			calibrator.reset();
+			ctx.ui.notify(
+				`pi-clm: compaction could not be re-anchored onto this branch (${projection.reason})` +
+					` and was discarded, so the raw context (${rawMessages.length} messages) will be sent.` +
+					" Re-run /clm-compact before continuing.",
+				"error",
+			);
 			let notice = `Discarded a stale projection: ${projection.reason}`;
 			if (invalidationStreak >= 2) {
 				notice +=
@@ -1673,6 +1797,7 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 			checkpoint = createProjectionCheckpoint({
 				revision,
 				sourceMessages: anchoredSource,
+				sourceEntries: coveredSourceEntries(ctx, baseline.rawMessages),
 				projectedMessages: result.messages,
 				beforeEstimate: beforeTokens,
 				afterEstimate: afterTokens,
