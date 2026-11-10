@@ -300,7 +300,7 @@ describe("a malformed edit trace does not discard the compaction it documents", 
 		const current = createProjectionCheckpoint({
 			revision: 12, sourceMessages: raw, projectedMessages: raw.slice(0, 2),
 			beforeEstimate: 26_770, afterEstimate: 18_117, estimateUnit: "tokens",
-			// The shape the wrecked seat wrote: provenance with an outputIndex past the output.
+			// Synthetic malformed provenance with an outputIndex past the output.
 			editTrace: {
 				version: 1, sourceRevision: 11, sourceMessageCount: 128, outputMessageCount: 114,
 				sources: [{ sourceIndex: 5, outputIndex: 300, kind: "kept" }], additions: [],
