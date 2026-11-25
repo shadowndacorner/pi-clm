@@ -56,6 +56,12 @@ header, refuse a stale draft, refuse to delete an owner turn, and print the resu
 `--dry-run` to preview. Hand-rolled `re.sub` over the whole file is how headers get lost; use the
 helper, or an `edit` call whose old-text anchor is one whole block.
 
+Two blocks are safe to edit in place: a **tool-result** body (it keeps its call identity) and
+an assistant body that carries **no tool calls**. Editing the body of an assistant turn that made
+tool calls drops those calls, and group repair then drops their results with them — the whole
+group goes. When you want a spent tool call's output gone, trim the *result* block and leave the
+assistant turn alone.
+
 A tidy pass in place of a summary:
 
 ```text

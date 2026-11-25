@@ -134,7 +134,9 @@ TIDY:
 with that header and every other block left byte-identical.
 
 Batch disjoint block edits into one write. "Batch" means many localized patches in a single
-write, never one synthetic summary of the conversation.
+write, never one synthetic summary of the conversation. Trim tool-result bodies and tool-call-free
+assistant bodies: editing the body of an assistant turn that made tool calls drops those calls,
+and group repair then drops their results with them.
 
 Before writing, run this self-test. (1) Which exact block ids am I changing, and what observed
 fact makes what I remove spent, superseded, duplicated, or recoverable from a file? If unsure,

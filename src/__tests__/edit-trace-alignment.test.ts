@@ -101,6 +101,26 @@ describe("edit trace alignment after tool-group repair", () => {
 		assertTraceAlignsWithOutput(result, snapshot);
 	});
 
+	test("editing the body of a tool-calling assistant drops its group, so trim results instead", () => {
+		const snapshot = snapshotOf(conversation());
+		const assistantId = blockId(snapshot, 1);
+		const lines = snapshot.text.split("\n");
+		const header = lines.findIndex((line) => line.startsWith("[[CTX_TURN ") && line.includes(`id=${assistantId} `));
+		const next = lines.findIndex((line, index) => index > header && line.startsWith("[[CTX_TURN "));
+		// Replace only that block's body, keeping its header — exactly what a tidy pass does.
+		const edited = [...lines.slice(0, header + 1), "did the work", ...lines.slice(next)].join("\n");
+		const result = applyContextDocument(edited, snapshot, clm);
+		assert.equal(result.accepted, true, result.reason);
+		assert.ok(
+			!result.messages.some((message) => message.role === "toolResult" && message.toolCallId === "c1"),
+			"the body no longer carries the call, so repair dropped the call and its result: trim a spent result block instead",
+		);
+		assert.ok(
+			result.messages.some((message) => message.role === "toolResult" && message.toolCallId === "c2"),
+			"unrelated groups stay",
+		);
+	});
+
 	test("an edited body after a repaired group is traced to the edited message", () => {
 		const snapshot = snapshotOf(conversation());
 		const edited = dropBlockById(snapshot, blockId(snapshot, 2)).replace("the conclusion is 7", "7");

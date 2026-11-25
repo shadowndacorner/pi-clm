@@ -137,6 +137,21 @@ describe("checked patch helper (clm-tidy)", () => {
 		assert.notEqual(result.status, 0, result.stdout + result.stderr);
 		assert.match(`${result.stderr}${result.stdout}`.toLowerCase(), /owner/);
 	});
+	test("an indented header example inside a body is content, not a malformed header", () => {
+		const { snapshot, file } = fixture();
+		const target = snapshot.blocks[2]!;
+		// The example sits in a block the patch does not touch, so it must survive.
+		const withExample = snapshot.text.replace(
+			"notes.txt has 400 lines",
+			'example shape:\n  [[CTX_TURN ... id=41 role=toolResult ...]] 4,000 lines\nnotes.txt has 400 lines',
+		);
+		writeFileSync(file, withExample);
+		const result = run(["--file", file, "--patch", `${target.id}=wc: 400 lines`]);
+		assert.equal(result.status, 0, result.stdout + result.stderr);
+		const after = readFileSync(file, "utf8");
+		assert.ok(after.includes("[[CTX_TURN ... id=41 role=toolResult"), "the example inside the body is kept");
+		assert.ok(after.includes("wc: 400 lines"));
+	});
 	test("--list prints only the metadata line and current headers", () => {
 		const { snapshot, file } = fixture();
 		const result = run(["--file", file, "--list"]);

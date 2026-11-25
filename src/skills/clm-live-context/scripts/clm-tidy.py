@@ -64,9 +64,11 @@ def load(text: str) -> tuple[str, dict, list[Block]]:
     blocks: list[Block] = []
     current: Block | None = None
     for line in lines[1:]:
-        stripped = line.strip()
-        if stripped.startswith(HEADER_SHAPE):
-            header = HEADER_RE.match(stripped)
+        # Structural lines are recognised only at the start of a line and only in the
+        # rendered form, exactly as the plugin's parser matches them. An indented example
+        # inside a body ("  [[CTX_TURN ... id=41 ...]]") is conversation content, not a header.
+        if line.startswith("[[CTX_TURN document="):
+            header = HEADER_RE.match(line.strip())
             if not header:
                 raise MirrorError(
                     f"malformed block header: {stripped[:120]}\n"
@@ -77,11 +79,11 @@ def load(text: str) -> tuple[str, dict, list[Block]]:
                     f"stale draft: header nonce {header.group(1)[:12]} does not match this document's nonce "
                     f"{nonce[:12]}. Re-read the mirror and re-apply the edit against the current headers."
                 )
-            current = Block(stripped, header.group(1), int(header.group(2)), header.group(3), header.group(4), header.group(5) == "true")
+            current = Block(line.strip(), header.group(1), int(header.group(2)), header.group(3), header.group(4), header.group(5) == "true")
             blocks.append(current)
             continue
-        if stripped.startswith("[[CTX_TURN ") or stripped.startswith("[[LIVE_CONTEXT "):
-            raise MirrorError(f"unrecognized structural line: {stripped[:120]}")
+        if line.startswith("[[LIVE_CONTEXT ") or line.startswith("[[CTX_TURN "):
+            raise MirrorError(f"unrecognized structural line: {line[:120]}")
         if current is not None:
             current.body_lines.append(line)
     ids = [block.id for block in blocks]
