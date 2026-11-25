@@ -1,0 +1,124 @@
+import assert from "node:assert/strict";
+import { describe, test } from "node:test";
+
+import { applyContextDocument, canonicalMessage, renderContextDocument } from "../context-document.ts";
+import type { ContextDocumentSnapshot, LiveContextMessage } from "../types.ts";
+
+const clm = { editingMode: "clm" as const };
+
+function conversation(): LiveContextMessage[] {
+	return [
+		{ role: "user", content: "task", timestamp: 1 },
+		{ role: "assistant", content: [{ type: "toolCall", id: "c1", name: "bash", arguments: {} }], timestamp: 2 } as LiveContextMessage,
+		{
+			role: "toolResult",
+			toolCallId: "c1",
+			toolName: "bash",
+			content: [{ type: "text", text: "one" }],
+			isError: false,
+			timestamp: 3,
+		} as LiveContextMessage,
+		{ role: "assistant", content: [{ type: "toolCall", id: "c2", name: "bash", arguments: {} }], timestamp: 4 } as LiveContextMessage,
+		{
+			role: "toolResult",
+			toolCallId: "c2",
+			toolName: "bash",
+			content: [{ type: "text", text: "two" }],
+			isError: false,
+			timestamp: 5,
+		} as LiveContextMessage,
+		{ role: "assistant", content: [{ type: "text", text: "the conclusion is 7" }], timestamp: 6 } as LiveContextMessage,
+		{ role: "user", content: "next step", timestamp: 7 },
+	];
+}
+
+function snapshotOf(messages: LiveContextMessage[]): ContextDocumentSnapshot {
+	return renderContextDocument(messages, { revision: 0, protectedIndexes: new Set(), documentSeed: "s" });
+}
+
+/** Drop one whole block (header + body) by its rendered block id. */
+function dropBlockById(snapshot: ContextDocumentSnapshot, id: string): string {
+	const lines = snapshot.text.split(/\r?\n/);
+	const header = lines.findIndex((line) => /^\[\[CTX_TURN /.test(line) && line.includes(`id=${id} `));
+	assert.notEqual(header, -1, `fixture could not find a block with id ${id}`);
+	const next = lines.findIndex((line, index) => index > header && /^\[\[CTX_TURN /.test(line));
+	const editedLines = [...lines.slice(0, header), ...lines.slice(next === -1 ? lines.length : next)];
+	assert.ok(!editedLines.some((line) => line.startsWith("[[CTX_TURN ") && line.includes(`id=${id} `)), "the fixture must remove the block header");
+	return editedLines.join("\n");
+}
+
+function blockId(snapshot: ContextDocumentSnapshot, index: number): string {
+	const block = snapshot.blocks.find((candidate) => candidate.index === index);
+	assert.ok(block, `fixture has no block at index ${index}`);
+	return block!.id;
+}
+
+/** Every retained trace entry must point at the message it claims to describe. */
+function assertTraceAlignsWithOutput(
+	result: { messages: LiveContextMessage[]; editTrace?: { sources: Array<{ sourceIndex?: number; outputIndex?: number; kind: string }>; outputMessageCount: number } },
+	snapshot: ContextDocumentSnapshot,
+) {
+	const trace = result.editTrace;
+	assert.ok(trace, "an accepted edit must carry an edit trace");
+	for (const source of trace.sources) {
+		if (source.kind === "removed" || source.sourceIndex === undefined || source.outputIndex === undefined) continue;
+		const claimed = result.messages[source.outputIndex];
+		assert.notEqual(claimed, undefined, `trace outputIndex ${source.outputIndex} is outside the projection (${result.messages.length} messages)`);
+		const expected = snapshot.messages[source.sourceIndex];
+		assert.notEqual(expected, undefined, `trace sourceIndex ${source.sourceIndex} is outside the source document`);
+		assert.equal(
+			canonicalMessage(claimed),
+			canonicalMessage(expected),
+			`trace entry (${source.sourceIndex} -> ${source.outputIndex}) describes the wrong message`,
+		);
+	}
+}
+
+describe("edit trace alignment after tool-group repair", () => {
+	test("a dropped tool-call group does not shift trace output indexes", () => {
+		const snapshot = snapshotOf(conversation());
+		// The model deletes one side of the first tool group; repair drops the whole group,
+		// so every later message moves two positions earlier in the projection.
+		const edited = dropBlockById(snapshot, blockId(snapshot, 2));
+		const result = applyContextDocument(edited, snapshot, clm);
+
+		assert.equal(result.accepted, true, result.reason);
+		assert.equal(result.messages.length, 5, "the dropped group must be gone from the projection");
+		assertTraceAlignsWithOutput(result, snapshot);
+	});
+
+	test("an orphaned tool result is dropped and later trace entries stay aligned", () => {
+		const snapshot = snapshotOf(conversation());
+		// Drop the assistant side of the second group: repair must drop its orphaned result.
+		const edited = dropBlockById(snapshot, blockId(snapshot, 3));
+		const result = applyContextDocument(edited, snapshot, clm);
+
+		assert.equal(result.accepted, true, result.reason);
+		assert.ok(
+			!result.messages.some((message) => message.role === "toolResult" && message.toolCallId === "c2"),
+			"the orphaned result must be dropped by group repair",
+		);
+		assertTraceAlignsWithOutput(result, snapshot);
+	});
+
+	test("an edited body after a repaired group is traced to the edited message", () => {
+		const snapshot = snapshotOf(conversation());
+		const edited = dropBlockById(snapshot, blockId(snapshot, 2)).replace("the conclusion is 7", "7");
+		const result = applyContextDocument(edited, snapshot, clm);
+
+		assert.equal(result.accepted, true, result.reason);
+		const trace = result.editTrace;
+		assert.ok(trace);
+		const editedEntry = trace.sources.find((source) => source.kind === "edited" || source.kind === "normalized");
+		assert.ok(editedEntry, "the shortened assistant turn must be traced as edited");
+		const described = result.messages[editedEntry!.outputIndex!];
+		assert.ok(
+			JSON.stringify(described?.content ?? "").includes("7"),
+			"the edited trace entry must point at the shortened body",
+		);
+		assertTraceAlignsWithOutput(
+			{ ...result, editTrace: { ...trace, sources: trace.sources.filter((source) => source.kind === "kept") } },
+			snapshot,
+		);
+	});
+});

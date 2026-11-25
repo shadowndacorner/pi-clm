@@ -34,6 +34,8 @@ interface ParsedDocument {
 	preamble: string;
 	duplicateIds: string[];
 	malformedCurrentHeaders: string[];
+	/** Header-shaped lines that are not valid headers of the current document (stale nonce, malformed, foreign). */
+	unrecognizedHeaderLines: string[];
 }
 
 function normalizeJson(value: unknown): unknown {
@@ -252,6 +254,13 @@ function parseDocument(text: string, snapshot: ContextDocumentSnapshot): ParsedD
 		.split(/\r?\n/)
 		.map((line) => line.trim())
 		.filter((line) => line.startsWith(currentPrefix) && !validHeaderLines.has(line));
+	// Header-shaped lines that the current document does not recognise: an older nonce, a
+	// malformed header, or a header for another revision. They make a draft a *stale or
+	// broken edit attempt*, never an intentional rewrite of the whole context.
+	const unrecognizedHeaderLines = text
+		.split(/\r?\n/)
+		.map((line) => line.trim())
+		.filter((line) => line.startsWith("[[CTX_TURN ") && !validHeaderLines.has(line));
 
 	const metadataEnd = metadata ? metadata[0].length : 0;
 	const firstBlockStart = matches[0]?.index ?? text.length;
@@ -271,6 +280,7 @@ function parseDocument(text: string, snapshot: ContextDocumentSnapshot): ParsedD
 		preamble,
 		duplicateIds,
 		malformedCurrentHeaders,
+		unrecognizedHeaderLines,
 	};
 }
 
@@ -341,8 +351,23 @@ function changedMessage(source: LiveContextMessage, body: string, requestedRole:
 	return contextNote(body, source, labelRole ? requestedRole : undefined);
 }
 
+interface RepairedGroups {
+	messages: LiveContextMessage[];
+	/** provenance[i] is the index in the pre-repair candidate array of `messages[i]`. */
+	provenance: number[];
+}
+
 function repairToolGroups(messages: LiveContextMessage[]): LiveContextMessage[] {
+	return repairToolGroupsWithProvenance(messages, messages.map((_, index) => index)).messages;
+}
+
+function repairToolGroupsWithProvenance(messages: LiveContextMessage[], provenance: number[]): RepairedGroups {
 	const repaired = [...messages];
+	const originOf = [...provenance];
+	const dropAt = (index: number, count: number) => {
+		repaired.splice(index, count);
+		originOf.splice(index, count);
+	};
 
 	// §11 limitation 2 fix. A broken tool-call group (the model edited or deleted
 	// one side of a call/result pair) is resolved structure-preserving:
@@ -380,7 +405,7 @@ function repairToolGroups(messages: LiveContextMessage[]): LiveContextMessage[] 
 		if (!hasText) {
 			// Deleted side, no prose to preserve: drop the group; that matches the
 			// model's deletion intent and keeps the remaining structure valid.
-			repaired.splice(index, cursor - index);
+			dropAt(index, cursor - index);
 			index -= 1;
 			continue;
 		}
@@ -397,12 +422,12 @@ function repairToolGroups(messages: LiveContextMessage[]): LiveContextMessage[] 
 		if (typeof message.toolCallId !== "string" || !ids.has(message.toolCallId)) {
 			// Orphan result: the assistant side is gone. Drop it — a text note would
 			// fabricate prose and the model asked for it to go.
-			repaired.splice(index, 1);
+			dropAt(index, 1);
 			index -= 1;
 		}
 	}
 
-	return repaired;
+	return { messages: repaired, provenance: originOf };
 }
 
 export function hasOrphanToolMessages(messages: LiveContextMessage[]): boolean {
@@ -481,9 +506,10 @@ export function applyContextDocument(
 		removedSourceIndexes: Set<number>,
 		diagnostics: string[],
 	): ApplyDocumentResult => {
-		const messages = repairToolGroups(candidate);
+		const repaired = repairToolGroupsWithProvenance(candidate, candidate.map((_, index) => index));
+		const messages = repaired.messages;
 		if (hasOrphanToolMessages(messages)) {
-			return rejected(snapshot, beforeEstimate, "Context edit could not be normalized to legal tool-call structure.");
+			return rejected(snapshot, beforeEstimate, "Context edit could not be normalized to legal tool-call structure.", diagnostics);
 		}
 		const afterEstimate = estimate(messages);
 		const requireShrink = options.requireShrink ?? options.editingMode !== "clm";
@@ -492,14 +518,26 @@ export function applyContextDocument(
 			if (!shrink.accepted) return rejected(snapshot, beforeEstimate, shrink.reason ?? "Context did not shrink.", diagnostics);
 		}
 
-		const tracedSources: ContextEditTrace["sources"] = candidateOrigins.flatMap((origin, outputIndex) => {
-			if (origin.sourceIndex === undefined) return [];
-			const wasNormalized = canonicalMessage(candidate[outputIndex]) !== canonicalMessage(messages[outputIndex]);
+		// Trace the *repaired* projection: outputIndex must address `messages`, so an
+		// accepted checkpoint never points at a message that group repair moved or removed.
+		const tracedSources: ContextEditTrace["sources"] = messages.flatMap((_, outputIndex) => {
+			const candidateIndex = repaired.provenance[outputIndex];
+			const origin = candidateOrigins[candidateIndex];
+			if (!origin || origin.sourceIndex === undefined) return [];
+			const wasNormalized = canonicalMessage(candidate[candidateIndex]) !== canonicalMessage(messages[outputIndex]);
 			const kind: ContextEditSourceKind = wasNormalized
 				? "normalized"
 				: origin.kind === "added" ? "edited" : origin.kind;
 			return [{ sourceIndex: origin.sourceIndex, outputIndex, kind }];
 		});
+		// A source the model kept but group repair dropped is gone from the projection: record
+		// it as removed rather than leaving it unattributed.
+		const surviving = new Set(repaired.provenance);
+		for (const [candidateIndex, origin] of candidateOrigins.entries()) {
+			if (origin.sourceIndex !== undefined && !surviving.has(candidateIndex)) {
+				tracedSources.push({ sourceIndex: origin.sourceIndex, kind: "removed" });
+			}
+		}
 		for (const sourceIndex of removedSourceIndexes) {
 			tracedSources.push({ sourceIndex, kind: "removed" });
 		}
@@ -529,9 +567,25 @@ export function applyContextDocument(
 
 	const parsed = parseDocument(editedText, snapshot);
 	const metadataLine = snapshot.text.split("\n")[0] ?? "";
-	// CLM: a file with no current block headers at all is the model replacing its whole
+	// A draft that carries header-shaped lines the current document does not recognise is a
+	// stale or broken *edit attempt* (headers re-typed from an earlier read, a nonce that no
+	// longer matches, a corrupted header). It must never fall through to the whole-context
+	// rewrite below: that path used to accept it as an intentional collapse and delete every
+	// block, including the owner's current instruction.
+	if (parsed.blocks.length === 0 && parsed.unrecognizedHeaderLines.length > 0) {
+		const example = parsed.unrecognizedHeaderLines[0] ?? "";
+		return rejected(
+			snapshot,
+			beforeEstimate,
+			`Mirror carries ${parsed.unrecognizedHeaderLines.length} block header(s) from another context revision and no current ones, so it looks like a stale edit rather than a rewrite: ${example.slice(0, 120)}. ` +
+				`Re-read the first line of the mirror and its headers, then re-apply the edit against revision ${snapshot.revision}. ` +
+				`To replace the whole context on purpose, remove every [[CTX_TURN ...]] header line.`,
+		);
+	}
+	// CLM: a file with no header-shaped lines at all is the model replacing its whole
 	// context with free text (the paper's "collapse to a summary" move). Accept it as one
-	// notes block, keeping the first user turn so the task statement survives.
+	// notes block, but keep every owner (user) turn: a collapse may summarise everything the
+	// model has already seen, never the instructions the owner gave.
 	if (options.editingMode === "clm" && parsed.blocks.length === 0 && editedText.trim().length > 0) {
 		const body = unescapeStructuralLines(
 			editedText
@@ -544,11 +598,12 @@ export function applyContextDocument(
 		const candidate: LiveContextMessage[] = [];
 		const candidateOrigins: Array<{ sourceIndex?: number; kind: ContextEditSourceKind | "added" }> = [];
 		const removedSourceIndexes = new Set<number>();
-		const firstUserIndex = snapshot.messages.findIndex((message) => message.role === "user");
+		let keptUserTurns = 0;
 		for (const [index, message] of snapshot.messages.entries()) {
-			if (index === firstUserIndex) {
+			if (message.role === "user") {
 				candidate.push(message);
 				candidateOrigins.push({ sourceIndex: index, kind: "kept" });
+				keptUserTurns += 1;
 			} else {
 				removedSourceIndexes.add(index);
 			}
@@ -556,8 +611,8 @@ export function applyContextDocument(
 		candidate.push(contextNote(body, undefined, "notes"));
 		candidateOrigins.push({ kind: "added" });
 		return finalize(candidate, candidateOrigins, removedSourceIndexes, [
-			"Accepted a headerless rewrite: every block was replaced by one notes block" +
-				(firstUserIndex >= 0 ? " after the first user turn" : "") +
+			"Accepted a full rewrite: every block was replaced by one notes block" +
+				(keptUserTurns > 0 ? ` after the ${keptUserTurns} owner turn(s)` : "") +
 				". To edit blocks individually, keep the [[CTX_TURN ...]] headers.",
 		]);
 	}
@@ -606,6 +661,7 @@ export function applyContextDocument(
 	const candidate: LiveContextMessage[] = [];
 	const candidateOrigins: Array<{ sourceIndex?: number; kind: ContextEditSourceKind | "added" }> = [];
 	const removedSourceIndexes = new Set<number>();
+	const droppedOwnerTurns: number[] = [];
 	// Stray text above the first block keeps its written position as a leading note.
 	if (parsed.preamble) {
 		candidate.push(contextNote(bodyText(parsed.preamble, snapshot)));
@@ -638,6 +694,7 @@ export function applyContextDocument(
 			continue;
 		}
 		if (!parsedBlock || !parsedBlock.body) {
+			if (options.editingMode === "clm" && sourceBlock.role === "user") droppedOwnerTurns.push(sourceBlock.index + 1);
 			removedSourceIndexes.add(sourceBlock.index);
 			continue;
 		}
@@ -652,6 +709,18 @@ export function applyContextDocument(
 			candidate.push(changedMessage(sourceBlock.source, bodyText(parsedBlock.body, snapshot), parsedBlock.role, options.editingMode === "clm"));
 			candidateOrigins.push({ sourceIndex: sourceBlock.index, kind: "edited" });
 		}
+	}
+
+	// An owner turn is an instruction, not the model's own work: deleting it silently retires
+	// a requirement the owner never withdrew. Bodies stay editable; removal is rejected.
+	if (droppedOwnerTurns.length > 0) {
+		return rejected(
+			snapshot,
+			beforeEstimate,
+			`Owner turns cannot be deleted from the context (turn ${droppedOwnerTurns.join(", ")}). ` +
+				`Keep their [[CTX_TURN ...]] headers: rewrite a turn's body to retire it, or move the block to reorder it.`,
+			diagnostics,
+		);
 	}
 
 	return finalize(candidate, candidateOrigins, removedSourceIndexes, diagnostics);

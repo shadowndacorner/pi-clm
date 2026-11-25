@@ -280,7 +280,14 @@ describe("tool-call structure repair", () => {
 		assert.equal(incomplete.accepted, true);
 		assert.equal(hasOrphanToolMessages(incomplete.messages), false);
 		assert.equal(incomplete.messages.some((message) => message.role === "toolResult"), false);
-		assert.equal(incomplete.editTrace?.sources[1]?.kind, "normalized");
+		// Group repair drops the whole incomplete group, so the assistant is traced as
+		// removed rather than pointing at a projection position that no longer exists.
+		const droppedAssistant = incomplete.editTrace?.sources.find((entry) => entry.sourceIndex === 1);
+		assert.equal(droppedAssistant?.kind, "removed");
+		assert.equal(droppedAssistant?.outputIndex, undefined);
+		for (const entry of incomplete.editTrace?.sources ?? []) {
+			if (entry.outputIndex !== undefined) assert.ok(entry.outputIndex < incomplete.messages.length, "trace outputIndex must address the projection");
+		}
 	});
 });
 
