@@ -14,15 +14,17 @@ import { readFileSync } from "node:fs";
 
 import { formatTokens } from "./settings.ts";
 
-export const DEFAULT_COMPACT_PROMPT = `Compact your live context now.
+export const DEFAULT_COMPACT_PROMPT = `Free room in your live context by trimming it where it sits.
 
 Your next request is about {{current}} tokens{{budget}}. Your context is mirrored at \`{{mirror}}\`; edit that file, following the Editable context protocol, to remove what you no longer need.
 
-Keep what you still need: the task and the user's latest requests, decisions and their reasons, open items, and exact values (ids, paths, numbers) you will use again. Drop what you no longer need: tool output you have already used, superseded drafts and intermediate steps. Prefer one scripted edit of the whole file over many small ones.
+Keep what you still need: the task and the user's latest requests, decisions and their reasons, open items, and exact values (ids, paths, numbers) you will use again. Drop what you no longer need: tool output you have already used, superseded drafts and intermediate steps.
+
+Trim in place: replace the body of each spent block with what it was and what it proved, and keep every header you retain. Apply all of those edits in one write; many localized patches in one revision, not one summary of the conversation. Only if localized trims cannot free enough room, delete every header and write a single notes block in their place, saying why.
 
 {{instructions}}
 
-When the edit is saved, reply in one line: what you kept, and the new approximate size.`;
+When the edit is saved, reply in one line: which blocks you trimmed, and the new approximate size.`;
 
 export interface CompactPromptValues {
 	mirror: string;

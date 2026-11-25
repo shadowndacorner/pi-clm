@@ -79,7 +79,8 @@ TASK TRACKER
   therefore never inject blocks. Conservative mode keeps the per-render nonce.
 - `id` binds a block to a specific rendered message. `index` is descriptive.
 - In CLM mode `protected` is always `false`; every block, including the first and latest
-  user turns, is editable.
+  user turns, is **editable** — but an owner (user) turn may not be *deleted*: a draft that
+  drops one of their headers is rejected. Retiring an instruction means rewriting its body.
 - A block whose id starts with `new-` inserts a message. Any role label is accepted.
 
 ## 4. Applying an edit
@@ -114,9 +115,22 @@ An edit is accepted when:
 3. the lowered message sequence is legal for Pi's `convertToLlm`;
 4. the revision can be serialized as a session custom entry.
 
-A file with no current block headers (CLM mode) is accepted as a whole-context rewrite:
-every block except the first user turn is removed and the text becomes one `notes` block.
-Metadata rejections quote the exact first line expected.
+Three more rules keep an accident from being read as an intention:
+
+- **A stale draft is never a rewrite.** A draft that carries header-shaped lines the current
+  document does not recognise (an older nonce, a malformed header) and none of its own is
+  rejected as stale, with the expected revision named. Before this rule such a draft fell into
+  the rewrite path below and deleted the whole context.
+- **A whole-context rewrite keeps every owner turn.** A file with no header-shaped lines at all
+  (CLM mode) becomes one `notes` block; every user turn survives verbatim, so a collapse can
+  summarise only what the model has already seen.
+- **Owner turns cannot be deleted.** A headed draft that removes a user block is rejected; its
+  body remains editable.
+
+The edit trace indexes the **repaired** projection: `outputIndex` addresses the messages that
+will actually be sent, so group repair can neither shift an index nor leave a checkpoint
+pointing at a message it removed. Sources the model kept but repair dropped are recorded as
+removed. Metadata rejections quote the exact first line expected.
 
 There is deliberately **no** size gate: growth, same-size rewrites, insertion, reordering,
 deletion and edits to any user turn are valid. Strategy is the model's (or a steering
@@ -358,7 +372,8 @@ src/timeline.ts              context-size timeline model and ASCII chart
 src/viewer.ts                /clm panel pages
 src/settings.ts              CLM settings table, overrides, parsing
 src/compact.ts               /clm-compact prompt and template loading
-src/skills/live-context/     conservative-mode editing recipes (not loaded in CLM mode)
+src/skills/live-context/     conservative-mode recipes: shrink required, surgical revision
+src/skills/clm-live-context/ CLM-mode tidy pass + scripts/clm-tidy.py, the checked patch helper
 src/__tests__/               unit and lifecycle tests
 ```
 
@@ -421,6 +436,14 @@ deliberate design boundary, not an omission:
   context handler mutates the hook message space, the next projection
   validation fails closed to the raw context with a notice (same degradation
   as any other stale projection).
+- **Fixed — stale draft accepted as a whole-context rewrite.** A mirror re-typed from an
+  earlier read carries headers with a superseded nonce, so no current header matched; the
+  headerless-rewrite path then accepted it and deleted every block except the first owner turn.
+  Such a draft is now rejected as stale, and a deliberate rewrite keeps every owner turn
+  (`collapse-gate.test.ts`).
+- **Fixed — edit trace indexed the pre-repair candidate.** Tool-group repair splices messages,
+  so a trace could point past the projection or at the wrong message, and a persisted checkpoint
+  could carry an invalid trace (`edit-trace-alignment.test.ts`).
 - **Fixed — broken tool pair demotion.** When the model deletes one side of a
   call/result pair, the whole group is now dropped (pure tool-call assistants)
   or loses only the orphaned result, instead of demoting the assistant message

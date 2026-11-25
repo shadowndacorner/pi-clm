@@ -669,7 +669,7 @@ describe("live-context extension lifecycle", () => {
 			cwd: process.cwd(),
 			reason: "startup",
 		});
-		assert.match(resources[0].skillPaths[0], /src\/skills$/);
+		assert.match(resources[0].skillPaths[0], /src\/skills\/live-context$/);
 
 		harness.setUsage(80);
 		const first = await emit(harness, "context", { type: "context", messages: rawConversation() });
@@ -922,7 +922,7 @@ describe("pi-clm entry point", () => {
 		await emit(harness, "session_start", { reason: "startup" });
 		try {
 			const resources = await emit(harness, "resources_discover", {});
-			assert.deepEqual(resources[0].skillPaths, []);
+			assert.match(resources[0].skillPaths[0], /src\/skills\/clm-live-context$/, "the tidy-pass skill is loaded in the default arm");
 			const before = await emit(harness, "before_agent_start", { systemPrompt: "base" });
 			const path = before[0].systemPrompt.match(/mirrored at `([^`]+)`/)[1];
 			const raw = rawConversation();
@@ -938,6 +938,13 @@ describe("pi-clm entry point", () => {
 			assert.equal(harness.branch.at(-1)?.data.lastOutcome.kind, "applied");
 			const projected = await emit(harness, "context", { messages: raw });
 			assert.equal(projected[0].messages[0].content, "expanded task ".repeat(100).trim());
+			const notices = projected[0].messages
+				.filter((message: LiveContextMessage) => message.customType === "live-context-notice")
+				.map((message: LiveContextMessage) => String(message.content));
+			assert.ok(
+				notices.some((text: string) => /context shape: \d+ kept, \d+ shortened in place, \d+ dropped, \d+ added/.test(text)),
+				`the acceptance notice must report block shape, not only a size delta: ${notices.join(" | ")}`,
+			);
 			const resumed = createHarness([...harness.branch]);
 			clmExtension(resumed.pi);
 			await emit(resumed, "session_start", { reason: "resume" });
@@ -1434,7 +1441,7 @@ describe("pi-clm entry point", () => {
 			const sent = harness.sentUserMessages.at(-1)!;
 			assert.equal(sent.options, undefined, "idle: sent now");
 			const prompt = String(sent.content);
-			assert.match(prompt, /^Compact your live context now\./);
+			assert.match(prompt, /^Free room in your live context/);
 			assert.ok(prompt.includes(`about 10k tokens (budget 100k). Your context is mirrored at \`${mirror}\``), prompt);
 			assert.doesNotMatch(prompt, /\{\{|Also:/);
 			assert.match(harness.notifications.at(-1)!, /Asked the model to compact its context \(now about 10k tokens\)/);

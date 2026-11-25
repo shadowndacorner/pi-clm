@@ -63,6 +63,7 @@ import {
 import { PressureTracker, selectContextVisibleMessages } from "./policy.ts";
 import {
 	compositionWarningText,
+	editShapeText,
 	contextMode,
 	outcomeText,
 	pressureNoticeText,
@@ -895,7 +896,9 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 	}
 
 	pi.on("resources_discover", () => ({
-		skillPaths: editingMode === "clm" ? [] : [join(EXTENSION_DIR, "skills")],
+		// One editing strategy per arm: the conservative skill mandates shrink and surgical
+		// revisions; the CLM skill teaches the in-place tidy pass. Loading both would mix them.
+		skillPaths: [join(EXTENSION_DIR, "skills", editingMode === "clm" ? "clm-live-context" : "live-context")],
 	}));
 
 	pi.registerTool({
@@ -906,7 +909,7 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 		promptSnippet: "Create, resolve, or list durable annotations for exact context sources",
 		promptGuidelines: [
 			"Use live_context_annotate before compacting an exact source that future work must preserve; choose pin only when its exact text must remain visible, continuity for a visible obligation and recall pointer, or archive for recall-only provenance.",
-			...(editingMode === "clm" ? [] : ["A live_context_annotate call does not justify broad compression: keep LIVE_CONTEXT.md edits surgical and preserve complete user/assistant exchanges by default."]),
+			"An annotation call never justifies broad compression: trim the blocks that made the source redundant and leave the rest of the mirror untouched.",
 		],
 		parameters: AnnotationParameters,
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
@@ -1862,7 +1865,8 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 		};
 		awaitObservationForRevision = revision;
 		const restored = result.diagnostics.length > 0 ? ` ${result.diagnostics.join(" ")}` : "";
-		queueOutcomeNotice(`${appliedMessage}${restored}`);
+		const shape = editShapeText(result.editTrace, result.diagnostics);
+		queueOutcomeNotice(`${appliedMessage}${shape ? ` ${shape}` : ""}${restored}`);
 		updateStatus(ctx);
 	});
 

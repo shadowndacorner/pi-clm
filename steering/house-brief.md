@@ -32,9 +32,10 @@ How to edit
   `id=new-tracker`) with a role label such as `notes`. Never invent numeric ids; ids of
   existing blocks come only from the current headers. Update the note in place afterwards
   instead of appending new copies.
-- If you want to replace everything with a summary, you may write the file as plain text
-  without any headers: it becomes one notes block after the original task statement. Use
-  this sparingly; you lose everything else.
+- Replace everything only as a last resort: deleting all headers and writing free text makes one
+  notes block after your owner turns. It flattens the structure you will want later, and every
+  later tidy then imitates that shape. Never leave old headers in a rewrite — that is rejected as
+  a stale draft.
 - Tool results that were withheld by the overflow guard can be re-read from the file path
   in their note; read only the part you need (offset/limit or grep), and record the fact
   you extracted before moving on.

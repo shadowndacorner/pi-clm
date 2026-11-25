@@ -11,7 +11,7 @@ describe("/clm-compact", () => {
 	test("the prompt fills placeholders, leaves unknown ones, and drops the empty instructions line", () => {
 		const values = { mirror: "/tmp/LIVE_CONTEXT.md", current: 110_000, budget: 1_000_000 };
 		const prompt = buildCompactPrompt(DEFAULT_COMPACT_PROMPT, values);
-		assert.match(prompt, /^Compact your live context now\./);
+		assert.match(prompt, /^Free room in your live context/);
 		assert.match(prompt, /about 110k tokens \(budget 1m\)\. Your context is mirrored at `\/tmp\/LIVE_CONTEXT\.md`/);
 		assert.doesNotMatch(prompt, /\{\{|Also:|\n{3}/);
 		assert.match(buildCompactPrompt(DEFAULT_COMPACT_PROMPT, { ...values, instructions: " keep ids " }), /\n\nAlso: keep ids\n\n/);

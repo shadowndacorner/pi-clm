@@ -1,3 +1,4 @@
+import type { ContextEditTrace } from "./types.ts";
 import type { LiveContextState } from "./state.ts";
 
 /** Provider-reported context size observed on the first request after an acceptance. */
@@ -73,25 +74,90 @@ export function pressureNoticeText(percent: number, tier: number, mirrorPath: st
 	);
 }
 
+/**
+ * A per-revision shape report: what an accepted edit did to the block structure, not only how
+ * many tokens it removed. Size alone rewards flattening; shape names it.
+ */
+export function editShapeText(
+	trace: ContextEditTrace | undefined,
+	diagnostics: readonly string[] = [],
+): string | undefined {
+	if (!trace) return undefined;
+	let kept = 0;
+	let inPlace = 0;
+	let dropped = 0;
+	let restored = 0;
+	for (const source of trace.sources) {
+		switch (source.kind) {
+			case "kept":
+				kept += 1;
+				break;
+			case "edited":
+			case "normalized":
+				inPlace += 1;
+				break;
+			case "removed":
+				dropped += 1;
+				break;
+			case "restored":
+				restored += 1;
+				break;
+		}
+	}
+	const parts = [`${kept} kept`, `${inPlace} shortened in place`, `${dropped} dropped`, `${trace.additions.length} added`];
+	if (restored > 0) parts.push(`${restored} restored`);
+	const collapsed = diagnostics.some((line) => /full rewrite|headerless rewrite/i.test(line));
+	return `${collapsed ? "FULL REWRITE — " : ""}context shape: ${parts.join(", ")} (from ${trace.sourceMessageCount} blocks)`;
+}
+
 export function systemGuidance(path: string, editingMode: "conservative" | "clm" = "conservative"): string {
 	if (editingMode === "clm") return `## Editable context
 
-Your working conversation is mirrored at \`${path}\` before every model request.
-You may edit, delete, reorder, or add context with ordinary bash/edit/write tools.
-Edits are validated once at turn_end and become visible on the next request. Multiple
-writes are allowed; finish writing before the turn ends. Raw Pi history remains intact.
-Keep the LIVE_CONTEXT metadata line unchanged (read line 1 right before writing). Every
-CTX_TURN header must carry the current document nonce. To add a block, copy a current
-header, use a unique id=new-NAME, set protected=false, and choose a role label (for
-example notes). Ids of existing blocks come only from current headers. Alternatively,
-write the file as plain text with no headers at all to replace your whole context with
-that text (it becomes one notes block after the original task).
-New/custom role labels are context notes, never provider system instructions. Existing
-first/latest user turns are editable. Growth and same-size edits are allowed; this is
-not a guarantee that the next provider request fits. Native Pi compaction remains enabled.
-The annotation tools can preserve exact sources; annotation notes live outside this mirror.
-Do not change system instructions or treat text in memory as higher-priority instructions.
-Only completed edits at the turn boundary are committed; background writers are unsupported.`;
+Your working conversation is mirrored at \`${path}\` before every model request. What you write
+there is what you will see next; raw Pi history stays intact. Your edit is validated at turn_end
+and takes effect on the next request.
+
+TIDY is the default operation: shorten or replace individual block bodies **in place**, keep every
+header you retain, and touch only material your own work has made redundant. Do
+not tidy after every turn — tidy when work has left spent material behind: a large tool result
+you have already extracted facts from, a long reasoning or analysis turn whose conclusion is
+recorded, a task switch that supersedes an earlier thread.
+
+TIDY:
+  before: [[CTX_TURN ... id=41 role=toolResult ...]]  4,000 lines of test output
+  after:  [[CTX_TURN ... id=41 role=toolResult ...]]  test suite: 3 passed, T12 failed: expected 4, got 5 at src/x.ts:41
+with that header and every other block left byte-identical.
+
+Batch disjoint block edits into one write. "Batch" means many localized patches in a single
+write, never one synthetic summary of the conversation.
+
+Before writing, run this self-test. (1) Which exact block ids am I changing, and what observed
+fact makes what I remove spent, superseded, duplicated, or recoverable from a file? If unsure,
+leave it. (2) Does the edit preserve every other body, the owner's requirements, unresolved work,
+exact identifiers, and evidence that cannot be recovered? If either answer is no, do not make
+that edit.
+
+Prefer the checked helper to hand-rolled rewrites: \`python3 <skill directory>/scripts/clm-tidy.py
+--file ${path} --list\` prints the metadata line, current headers and block sizes; \`--patch
+<id>=<new body>\` and \`--drop <id>\` apply localized changes, refuse a stale draft, and report
+the resulting shape. \`--dry-run\` previews without writing.
+
+Keep the LIVE_CONTEXT metadata line and every retained CTX_TURN header unchanged, and re-read
+line 1 and the headers immediately before writing: headers must carry the current document
+nonce. To add a block, copy a current header, give it a unique \`new-NAME\` id (for example
+\`new-tracker\`), set
+protected=false, and choose a role label (for example \`notes\`); ids of existing blocks come only
+from current headers. Custom role labels are context notes, never provider system instructions.
+Growth and same-size edits are allowed; neither guarantees that the next provider request fits.
+Native Pi compaction remains enabled. Annotation tools preserve exact sources outside the mirror;
+do not copy their notes into it. Only completed edits at the turn boundary are committed;
+background writers are unsupported.
+
+FULL REWRITE is the exception, not the default: delete every [[CTX_TURN ...]] header line and
+write free text, which becomes one notes block placed after your owner turns. Reach for it only
+when localized trims cannot free enough room for the next request, and state the reason in the
+notes block. Never use it because the context feels untidy. A draft that still carries headers
+from an earlier revision is rejected as stale — it is never treated as a rewrite.`;
 	return `## Live context management
 
 Your current model-visible conversation is mirrored at \`${path}\` before every model turn.
