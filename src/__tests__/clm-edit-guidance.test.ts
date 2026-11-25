@@ -64,6 +64,10 @@ describe("CLM-mode system guidance", () => {
 		assert.match(guidance, /clm-tidy/);
 		assert.match(guidance, /self-test/i);
 	});
+	test("names the helper's absolute path when the extension knows it", () => {
+		const concrete = systemGuidance("/tmp/LIVE_CONTEXT.md", "clm", "/opt/pi-clm/scripts/clm-tidy.py");
+		assert.match(concrete, /python3 \/opt\/pi-clm\/scripts\/clm-tidy\.py --file \/tmp\/LIVE_CONTEXT\.md --list/);
+	});
 });
 
 describe("CLM live-context skill", () => {

@@ -9,6 +9,21 @@ corepack pnpm install --frozen-lockfile
 corepack pnpm check      # strict typecheck + tests
 ```
 
+## Measuring edit shape
+
+Whether the model is tidying in place or flattening its own context is visible in
+the revision traces already stored in the session history:
+
+```sh
+python3 scripts/edit-shape-audit.py            # defaults to ~/.local/state/pi-clm/sessions
+```
+
+It reports, per accepted revision, how many blocks were left byte-identical,
+shortened in place, dropped, or replaced by a full rewrite, plus rejected edits
+by reason. A tidy pass shows a high byte-identical share with small localized
+changes; summarisation shows the opposite at nearly any token cost, which is why
+shape is measured next to cost rather than instead of it.
+
 ## Running a checkout in Pi
 
 For one session:

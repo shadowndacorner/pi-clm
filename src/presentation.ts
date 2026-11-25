@@ -110,7 +110,12 @@ export function editShapeText(
 	return `${collapsed ? "FULL REWRITE — " : ""}context shape: ${parts.join(", ")} (from ${trace.sourceMessageCount} blocks)`;
 }
 
-export function systemGuidance(path: string, editingMode: "conservative" | "clm" = "conservative"): string {
+export function systemGuidance(
+	path: string,
+	editingMode: "conservative" | "clm" = "conservative",
+	helperPath?: string,
+): string {
+	const helper = helperPath ?? "<skill directory>/scripts/clm-tidy.py";
 	if (editingMode === "clm") return `## Editable context
 
 Your working conversation is mirrored at \`${path}\` before every model request. What you write
@@ -137,8 +142,7 @@ leave it. (2) Does the edit preserve every other body, the owner's requirements,
 exact identifiers, and evidence that cannot be recovered? If either answer is no, do not make
 that edit.
 
-Prefer the checked helper to hand-rolled rewrites: \`python3 <skill directory>/scripts/clm-tidy.py
---file ${path} --list\` prints the metadata line, current headers and block sizes; \`--patch
+Prefer the checked helper to hand-rolled rewrites: \`python3 ${helper} --file ${path} --list\` prints the metadata line, current headers and block sizes; \`--patch
 <id>=<new body>\` and \`--drop <id>\` apply localized changes, refuse a stale draft, and report
 the resulting shape. \`--dry-run\` previews without writing.
 

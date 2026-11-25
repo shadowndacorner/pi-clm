@@ -1358,7 +1358,8 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 
 	pi.on("before_agent_start", async (event) => {
 		if (!state.enabled || !store) return;
-		const sections = [event.systemPrompt, systemGuidance(store.filePath, editingMode)];
+		const helper = join(EXTENSION_DIR, "skills", "clm-live-context", "scripts", "clm-tidy.py");
+		const sections = [event.systemPrompt, systemGuidance(store.filePath, editingMode, helper)];
 		if (steering) sections.push(steeringPromptSection(steering));
 		return { systemPrompt: sections.join("\n\n") };
 	});
