@@ -24,7 +24,7 @@ Values keep their case (paths), names do not.
 | `steering`       | markdown file with your context-management strategy, appended to the system prompt                                | `house` (the bundled `steering/house-brief.md`), a path, `none` | off |
 | `one-tool`       | paper-harness parity: block every tool call after the first in a turn                                             | `on`, `off`                                   | off          |
 | `trailer`        | paper-harness parity: append `[context: ~N of B tokens]` to every tool result                                     | `on`, `off`                                   | off          |
-| `compact-prompt` | markdown template `/clm-compact` sends instead of the built-in prompt                                             | a path, `default`                             | built in     |
+| `tidy-prompt` | markdown template `/clm-tidy` sends instead of the built-in prompt                                             | a path, `default`                             | built in     |
 
 ## Environment variables
 
@@ -44,7 +44,7 @@ saying which variable is wrong.
 | `PI_CLM_STEERING`           | a path to a markdown file (for the bundled brief, its path: `<package>/steering/house-brief.md`); `none` or `off` | `steering` |
 | `PI_CLM_ONE_TOOL_PER_TURN`  | `1`, `true`, `on` or `yes`; anything else is off                                 | `one-tool`      |
 | `PI_CLM_SIZE_TRAILER`       | `1`, `true`, `on` or `yes`; anything else is off                                 | `trailer`       |
-| `PI_CLM_COMPACT_PROMPT`     | a path to a markdown template; `default`, `none` or `off` for the built-in prompt | `compact-prompt` |
+| `PI_CLM_TIDY_PROMPT`     | a path to a markdown template; `default`, `none` or `off` for the built-in prompt | `tidy-prompt` |
 | `PI_CLM_ESTIMATE_FACTOR`    | a number from 1 to 4: the prior for the size calibration (dense data: `2`)        | —               |
 
 ## Notes
@@ -59,8 +59,8 @@ saying which variable is wrong.
 - **Steering.** The harness text stays protocol-only; a steering document is the one place
   for strategy. `/clm settings` shows the document's name and SHA-256 prefix, so an
   experiment can record which brief was used.
-- **Compact prompt.** A template may use `{{mirror}}`, `{{current}}`, `{{budget}}` and
+- **Tidy prompt.** A template may use `{{mirror}}`, `{{current}}`, `{{budget}}` and
   `{{instructions}}`; unknown placeholders stay as written, and text typed after
-  `/clm-compact` is always included.
+  `/clm-tidy` is always included.
 - **Parity switches** exist to compare with the paper's harness, which allows one tool call
   per turn and shows the context size in every observation. Leave them off for normal use.

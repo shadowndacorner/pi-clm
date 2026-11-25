@@ -1,12 +1,12 @@
 /**
- * `/clm-compact [instructions]`: ask the model to compact its own live context now.
+ * `/clm-tidy [instructions]`: ask the model to compact its own live context now.
  *
  * This is a fixed prompt, not a harness-side edit: the model decides what to keep and
  * edits the mirror with its tools, and the edit is validated and committed at turn end like
  * any other. (Pi's `/compact` instead summarizes the raw transcript with a separate call
  * and resets the CLM projection.)
  *
- * A replacement template (the `compact prompt` setting) may use `{{mirror}}`, `{{current}}`,
+ * A replacement template (the `tidy prompt` setting) may use `{{mirror}}`, `{{current}}`,
  * `{{budget}}` and `{{instructions}}`; unknown placeholders are left as written.
  */
 
@@ -14,7 +14,7 @@ import { readFileSync } from "node:fs";
 
 import { formatTokens } from "./settings.ts";
 
-export const DEFAULT_COMPACT_PROMPT = `Free room in your live context by trimming it where it sits.
+export const DEFAULT_TIDY_PROMPT = `Free room in your live context by trimming it where it sits.
 
 Your next request is about {{current}} tokens{{budget}}. Your context is mirrored at \`{{mirror}}\`; edit that file, following the Editable context protocol, to remove what you no longer need.
 
@@ -26,16 +26,16 @@ Trim in place: replace the body of each spent block with what it was and what it
 
 When the edit is saved, reply in one line: which blocks you trimmed, and the new approximate size.`;
 
-export interface CompactPromptValues {
+export interface TidyPromptValues {
 	mirror: string;
 	/** Calibrated size of the next request, tokens. */
 	current: number;
 	budget?: number;
-	/** Free text after `/clm-compact`. */
+	/** Free text after `/clm-tidy`. */
 	instructions?: string;
 }
 
-export function buildCompactPrompt(template: string, values: CompactPromptValues): string {
+export function buildTidyPrompt(template: string, values: TidyPromptValues): string {
 	const instructions = values.instructions?.trim() ? `Also: ${values.instructions.trim()}` : "";
 	const replacements = new Map<string, string>([
 		["mirror", values.mirror],
@@ -53,22 +53,22 @@ export function buildCompactPrompt(template: string, values: CompactPromptValues
 		.trim();
 }
 
-/** `PI_CLM_COMPACT_PROMPT`: a template path; unset, `default`, `none` or `off` mean the built-in prompt. */
-export function compactPromptFromEnv(env: NodeJS.ProcessEnv = process.env): string | undefined {
-	const raw = env.PI_CLM_COMPACT_PROMPT?.trim();
+/** `PI_CLM_TIDY_PROMPT`: a template path; unset, `default`, `none` or `off` mean the built-in prompt. */
+export function tidyPromptFromEnv(env: NodeJS.ProcessEnv = process.env): string | undefined {
+	const raw = env.PI_CLM_TIDY_PROMPT?.trim();
 	if (!raw || ["default", "none", "off"].includes(raw.toLowerCase())) return undefined;
 	return raw;
 }
 
 /** The built-in prompt, or the template at `path` (read on every use, so edits apply at once). */
-export function loadCompactPrompt(path: string | undefined): string {
-	if (!path) return DEFAULT_COMPACT_PROMPT;
+export function loadTidyPrompt(path: string | undefined): string {
+	if (!path) return DEFAULT_TIDY_PROMPT;
 	let text: string;
 	try {
 		text = readFileSync(path, "utf8").trim();
 	} catch (error) {
-		throw new Error(`compact prompt not loaded: ${error instanceof Error ? error.message : String(error)}`);
+		throw new Error(`tidy prompt not loaded: ${error instanceof Error ? error.message : String(error)}`);
 	}
-	if (!text) throw new Error(`compact prompt is empty: ${path}`);
+	if (!text) throw new Error(`tidy prompt is empty: ${path}`);
 	return text;
 }

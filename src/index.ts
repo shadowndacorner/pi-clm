@@ -93,7 +93,7 @@ import {
 	resetProjectionState,
 	toOutcomeEntry,
 } from "./state.ts";
-import { buildCompactPrompt, loadCompactPrompt } from "./compact.ts";
+import { buildTidyPrompt, loadTidyPrompt } from "./tidy.ts";
 import {
 	applyOverrides,
 	changedSettings,
@@ -229,8 +229,8 @@ export interface LiveContextExtensionOptions {
 	oneToolPerTurn?: boolean;
 	/** Paper-harness parity: append `[context: ~N of B tokens]` to every tool result. */
 	sizeTrailer?: boolean;
-	/** `/clm-compact` prompt template (markdown with {{placeholders}}); default is the built-in prompt. */
-	compactPromptPath?: string;
+	/** `/clm-tidy` prompt template (markdown with {{placeholders}}); default is the built-in prompt. */
+	tidyPromptPath?: string;
 }
 
 export default function liveContextExtension(pi: ExtensionAPI, options: LiveContextExtensionOptions = {}): void {
@@ -240,8 +240,8 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 	let store: MirrorStore | undefined;
 	let turnBaseline: TurnBaseline | undefined;
 	let lifecycleEpoch = 0;
-	/** A /clm-compact waiting for the agent to go idle; a second one is refused instead of racing it. */
-	let compactPending = false;
+	/** A /clm-tidy waiting for the agent to go idle; a second one is refused instead of racing it. */
+	let tidyPending = false;
 	let pendingNotice: string | undefined;
 	let stickyNotice: string | undefined;
 	let stickyNoticeRepeats = 0;
@@ -304,7 +304,7 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 	/**
 	 * Resolve `next` without touching the live configuration, so a change can be validated
 	 * and persisted before it takes effect. With `strictSteering` (interactive edits), a
-	 * steering document or compact prompt that fails to load rejects the whole change;
+	 * steering document or tidy prompt that fails to load rejects the whole change;
 	 * otherwise a steering failure is recorded and reported, and the rest applies (startup,
 	 * resume).
 	 */
@@ -324,8 +324,8 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 				}
 			}
 		}
-		// A template that cannot be read is rejected when it is set, not when /clm-compact runs.
-		if (strictSteering && next.compactPrompt && next.compactPrompt !== settings.compactPrompt) loadCompactPrompt(next.compactPrompt);
+		// A template that cannot be read is rejected when it is set, not when /clm-tidy runs.
+		if (strictSteering && next.tidyPrompt && next.tidyPrompt !== settings.tidyPrompt) loadTidyPrompt(next.tidyPrompt);
 		const sameReminders = next.reminders.join(",") === baseSettings.reminders.join(",");
 		const nextBudgetPolicy = resolveBudgetPolicy({
 			...options.budget,
@@ -1061,39 +1061,39 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 
 	if (editingMode === "clm") {
 		// A top-level command so Pi's completion shows it beside its own /compact.
-		pi.registerCommand(`${commandName}-compact`, {
+		pi.registerCommand(`${commandName}-tidy`, {
 			description:
 				"Ask the model to compact its own live context now; text after the command is passed along as instructions. (Pi's /compact summarizes the transcript and resets CLM instead.)",
-			handler: async (args, ctx) => compactCommand(args, ctx),
+			handler: async (args, ctx) => tidyCommand(args, ctx),
 		});
 	}
 
 	/**
-	 * `/clm-compact [instructions]`: send the (configurable) compaction prompt as a user
+	 * `/clm-tidy [instructions]`: send the (configurable) tidy prompt as a user
 	 * message. The model does the editing; its edit is validated and committed at turn end
 	 * like any other.
 	 */
-	async function compactCommand(args: string, ctx: ExtensionCommandContext): Promise<void> {
-		if (compactPending) {
-			ctx.ui.notify("A /clm-compact is already waiting for the current run to finish.", "info");
+	async function tidyCommand(args: string, ctx: ExtensionCommandContext): Promise<void> {
+		if (tidyPending) {
+			ctx.ui.notify("A /clm-tidy is already waiting for the current run to finish.", "info");
 			return;
 		}
 		let template: string;
 		try {
-			template = loadCompactPrompt(settings.compactPrompt);
+			template = loadTidyPrompt(settings.tidyPrompt);
 		} catch (error) {
 			ctx.ui.notify(error instanceof Error ? error.message : String(error), "warning");
 			return;
 		}
-		compactPending = true;
+		tidyPending = true;
 		try {
 			// Measure once the agent is idle, so the size in the prompt is the one the model sees.
-			if (!ctx.isIdle()) ctx.ui.notify("The model will compact its context when the current run finishes.", "info");
+			if (!ctx.isIdle()) ctx.ui.notify("The model will tidy its context when the current run finishes.", "info");
 			const epoch = lifecycleEpoch;
 			await ctx.waitForIdle();
 			// A branch switch, reset, reload or /clm off while waiting: that is a different context.
 			if (epoch !== lifecycleEpoch) {
-				ctx.ui.notify("The live context changed while /clm-compact was waiting, so nothing was sent. Run it again if you still want it.", "warning");
+				ctx.ui.notify("The live context changed while /clm-tidy was waiting, so nothing was sent. Run it again if you still want it.", "warning");
 				return;
 			}
 			const activeStore = store;
@@ -1110,20 +1110,20 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 			// No usable measurement (e.g. just after resume): estimate the context that would be sent.
 			const effective = next === undefined && observed === undefined ? contextSnapshot(ctx).effectiveMessages : undefined;
 			if (effective?.length === 0) {
-				ctx.ui.notify("Nothing to compact yet: the context is empty.", "warning");
+				ctx.ui.notify("Nothing to tidy yet: the context is empty.", "warning");
 				return;
 			}
 			const current = next ?? observed ?? estimateRequestTokens(ctx, effective ?? []);
-			const prompt = buildCompactPrompt(template, { mirror: activeStore.filePath, current, budget, instructions: args });
+			const prompt = buildTidyPrompt(template, { mirror: activeStore.filePath, current, budget, instructions: args });
 			try {
 				pi.sendUserMessage(prompt, ctx.isIdle() ? undefined : { deliverAs: "followUp" });
 			} catch (error) {
-				ctx.ui.notify(`/clm-compact was not sent: ${error instanceof Error ? error.message : String(error)}`, "warning");
+				ctx.ui.notify(`/clm-tidy was not sent: ${error instanceof Error ? error.message : String(error)}`, "warning");
 				return;
 			}
-			ctx.ui.notify(`Asked the model to compact its context (now about ${formatTokens(current)} tokens).`, "info");
+			ctx.ui.notify(`Asked the model to tidy its context (now about ${formatTokens(current)} tokens).`, "info");
 		} finally {
-			compactPending = false;
+			tidyPending = false;
 		}
 	}
 
@@ -1491,7 +1491,7 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 			ctx.ui.notify(
 				`pi-clm: compaction could not be re-anchored onto this branch (${projection.reason})` +
 					` and was discarded, so the raw context (${rawMessages.length} messages) will be sent.` +
-					" Re-run /clm-compact before continuing.",
+					" Re-run /clm-tidy before continuing.",
 				"error",
 			);
 			let notice = `Discarded a stale projection: ${projection.reason}`;

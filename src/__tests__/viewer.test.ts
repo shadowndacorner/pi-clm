@@ -724,7 +724,7 @@ describe("live-context viewer TUI", () => {
 		assert.doesNotMatch(opened, /peak \d.*last/, "no bucket sizes in the details, only the time period");
 		assert.match(opened, / {2}▸ r1 /, "other rows stay collapsed");
 		viewer.handleInput("\u001b[D");
-		assert.match(viewer.render(80).join("\n"), /› ▾ r2 .*\n.*after request 150.*\n.*\(\d+ min\)/, "a compaction point shows its column's period");
+		assert.match(viewer.render(80).join("\n"), /› ▾ r2 .*\n.*after request 150.*\n.*\(\d+ min\)/, "a edit point shows its column's period");
 		viewer.handleInput("\u001b[C");
 
 		viewer.handleInput("z"); // requests: one column per request, panning
@@ -733,13 +733,13 @@ describe("live-context viewer TUI", () => {
 		assert.equal(window(opened2)[1], 300, "the newest requests");
 		assert.doesNotMatch(xLabel(opened2), /later/);
 
-		viewer.handleInput("\u001b[D"); // ←: newest compaction point, centred
+		viewer.handleInput("\u001b[D"); // ←: newest edit point, centred
 		const second = viewer.render(80).join("\n");
 		const [start, end] = window(second);
 		assert.ok(start <= 150 && 150 <= end, `request 150 visible in ${start}–${end}`);
 		assert.ok(Math.abs((start + end) / 2 - 150) <= 1, `request 150 centred in ${start}–${end}`);
 		assert.match(second, /› ▾ r2 .*\n.*after request 150/);
-		viewer.handleInput("\u001b[D"); // ←: first compaction point, window clamped at the start
+		viewer.handleInput("\u001b[D"); // ←: first edit point, window clamped at the start
 		assert.equal(window(viewer.render(80).join("\n"))[0], 1);
 		viewer.handleInput("\u001b[C");
 		viewer.handleInput("\u001b[C"); // → → back to now

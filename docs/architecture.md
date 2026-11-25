@@ -255,7 +255,7 @@ an unchanged capped block is persisted in its capped form when an edit is accept
 ## 7c. Settings
 
 `src/settings.ts` is the one table of CLM settings — budget, reserve, reminders, overflow
-guard, Pi compaction, observation cap, steering, one tool per turn, size trailer, compact
+guard, Pi compaction, observation cap, steering, one tool per turn, size trailer, tidy
 prompt — with
 each one's label, description, environment variable, formatting and parsing. Defaults come
 from the extension options (the environment at load). A change from the panel or
@@ -266,21 +266,21 @@ branch-local and restored on resume, `/reload` and `/tree` like the projection; 
 value that is malformed (another version, a hand edit) is ignored with a warning in
 `/clm status` instead of breaking session start.
 `/clm config reset` appends an empty override set. A steering change that fails to load is
-rejected and the previous document stays active, as is a compact prompt that cannot be read.
+rejected and the previous document stays active, as is a tidy prompt that cannot be read.
 
-## 7d. Model-driven compaction (`/clm-compact`)
+## 7d. Model-driven tidying (`/clm-tidy`)
 
-`src/compact.ts`. `/clm-compact [instructions]` is a top-level command, so Pi's
+`src/compact.ts`. `/clm-tidy [instructions]` is a top-level command, so Pi's
 completion lists it beside `/compact`. It waits until the agent is idle, then sends a
-fixed prompt as an ordinary user message: compact the live context by editing the mirror,
+fixed prompt as an ordinary user message: tidy the live context in place by editing the mirror,
 keeping the task, decisions, open items and exact values, and dropping used tool output.
 Text after the command is appended as "Also: …". The model decides how much to remove; its
 edit is validated and committed at turn end like any other, and the harness removes
 nothing itself. (Pi's `/compact` instead summarizes the raw history with a separate call
 and resets the projection.) If the live context changes while it waits (branch switch,
-reset, reload), nothing is sent; a second `/clm-compact` while one is waiting is refused.
+reset, reload), nothing is sent; a second `/clm-tidy` while one is waiting is refused.
 Without a measured request (e.g. just after resume) the size in the prompt is estimated
-from the reconstructed context. The `compact prompt` setting (`PI_CLM_COMPACT_PROMPT`;
+from the reconstructed context. The `tidy prompt` setting (`PI_CLM_TIDY_PROMPT`;
 `default` = built in) replaces the built-in text with a markdown template using
 `{{mirror}}`, `{{current}}`, `{{budget}}` and `{{instructions}}` (typed instructions are
 appended when the template has no `{{instructions}}`); the file is read on every use.
@@ -294,9 +294,9 @@ changed settings). Four pages:
 
 - **overview** — a bar chart of the provider-reported size of every request on the
   branch (one column per request), the budget as a dashed line, requests followed by an
-  accepted edit marked, and the list of compaction points with per-message counts. It
+  accepted edit marked, and the list of edit points with per-message counts. It
   opens on **now** (the latest request, pinned to the right edge); `← →` step through
-  compaction points and back to now. When the branch is wider than the terminal the
+  edit points and back to now. When the branch is wider than the terminal the
   window pans to keep the selected point centred, clamped so it never shows empty columns.
   `z` cycles the x axis (`TimelineZoom` in `src/timeline.ts`; shown to users as all /
   detail / turns): `fit` (the whole history of the current branch,
@@ -329,7 +329,7 @@ changed settings). Four pages:
   column. Laid-out rows are cached per width and cleared on theme invalidation.
 - **settings** — sizes (calibrated next request, last provider count), the guard limit,
   the steering hash and files above a Pi `SettingsList` of the settings in §7c: `Enter`
-  cycles a setting's choices or opens a text prompt (budget, reserve, compact prompt); rejected values
+  cycles a setting's choices or opens a text prompt (budget, reserve, tidy prompt); rejected values
   show a warning and keep the value in effect; changed settings are marked `•`. The list
   shows as many settings as fit with the (wrapped) summary and the selected setting's
   description; on a short terminal the page scrolls so the selected setting, or the open
@@ -371,7 +371,7 @@ src/presentation.ts          status text and system-prompt guidance
 src/timeline.ts              context-size timeline model and ASCII chart
 src/viewer.ts                /clm panel pages
 src/settings.ts              CLM settings table, overrides, parsing
-src/compact.ts               /clm-compact prompt and template loading
+src/tidy.ts                /clm-tidy prompt and template loading
 src/skills/live-context/     conservative-mode recipes: shrink required, surgical revision
 src/skills/clm-live-context/ CLM-mode tidy pass + scripts/clm-tidy.py, the checked patch helper
 src/__tests__/               unit and lifecycle tests
@@ -384,7 +384,7 @@ unrestricted write access to the context of its next request, following
 [Context Language Models](https://github.com/RulinShao/Context-Language-Model). The harness
 guarantees only that the result is *valid* — it can be sent to a provider, raw history is
 never lost, revisions are atomic and attributable — and that the model is *budget-aware*:
-it always knows how much room it has. When to compact, what to keep, whether to grow a
+it always knows how much room it has. When to tidy, what to keep, whether to grow a
 scratchpad or invent a role belongs to the model, or to a steering document the user
 chooses, never to the validator.
 
@@ -420,7 +420,7 @@ the provider's own count arrives one request late. Both are shown and labelled, 
 estimate is calibrated against the count (§7a).
 
 **The timeline is derived, not stored.** Context size per request comes from assistant
-usage already in the session file, and compaction points from revision entries, so the
+usage already in the session file, and edit points from revision entries, so the
 panel works on resume without extra persistence.
 
 ### Known limitations (updated 2026-10-11)
@@ -459,8 +459,8 @@ deliberate design boundary, not an omission:
   raw transcript and re-anchoring every checkpoint mid-history: a redesign of
   the recovery protocol, not a bug fix. The existing mitigations stand:
   automatic compaction is paused by default (`compaction` setting `auto`)
-  while the overflow guard enforces the budget, and the model can self-compact
-  via mirror edits or `/clm-compact`. Manual `/compact` remains an explicit
+  while the overflow guard enforces the budget, and the model can tidy its context
+  via mirror edits or `/clm-tidy`. Manual `/compact` remains an explicit
   operator action that intentionally resets the projection to the summarized
   raw baseline. Revisit only with a dedicated design.
 - **Fixed — container-invisible mirror.** `PI_CLM_MIRROR_DIR` (or the same

@@ -30,8 +30,8 @@ export interface ClmSettings {
 	steering?: string;
 	oneTool: boolean;
 	trailer: boolean;
-	/** `/clm-compact` prompt template path; undefined uses the built-in prompt. */
-	compactPrompt?: string;
+	/** `/clm-tidy` prompt template path; undefined uses the built-in prompt. */
+	tidyPrompt?: string;
 }
 
 export type ClmSettingKey = keyof Omit<ClmSettings, "capHead">;
@@ -52,7 +52,7 @@ export function defaultClmSettings(input: {
 	steeringPath?: string;
 	oneToolPerTurn?: boolean;
 	sizeTrailer?: boolean;
-	compactPromptPath?: string;
+	tidyPromptPath?: string;
 }): ClmSettings {
 	return {
 		budget: input.budget?.contextBudget,
@@ -65,7 +65,7 @@ export function defaultClmSettings(input: {
 		steering: input.steeringPath,
 		oneTool: input.oneToolPerTurn === true,
 		trailer: input.sizeTrailer === true,
-		compactPrompt: input.compactPromptPath,
+		tidyPrompt: input.tidyPromptPath,
 	};
 }
 
@@ -98,7 +98,7 @@ const VALID_OVERRIDE: Record<keyof ClmSettings, (value: unknown) => boolean> = {
 	steering: isPath,
 	oneTool: (value) => typeof value === "boolean",
 	trailer: (value) => typeof value === "boolean",
-	compactPrompt: isPath,
+	tidyPrompt: isPath,
 };
 
 /**
@@ -276,16 +276,16 @@ export const CLM_SETTINGS: readonly ClmSettingDescriptor[] = [
 		parse: (text) => ({ trailer: parseOnOff(text, "size trailer") }),
 	},
 	{
-		key: "compactPrompt",
-		label: "Compact prompt",
-		description: "Markdown template /clm-compact sends instead of the built-in prompt; may use {{mirror}} {{current}} {{budget}} {{instructions}}. Type a path, or \"default\" for the built-in prompt. Env: PI_CLM_COMPACT_PROMPT.",
+		key: "tidyPrompt",
+		label: "Tidy prompt",
+		description: "Markdown template /clm-tidy sends instead of the built-in prompt; may use {{mirror}} {{current}} {{budget}} {{instructions}}. Type a path, or \"default\" for the built-in prompt. Env: PI_CLM_TIDY_PROMPT.",
 		// A text prompt, not a cycle: a custom path is not recoverable once cycled away.
 		placeholder: "path/to/prompt.md, or default",
-		format: (settings) => (settings.compactPrompt ? basename(settings.compactPrompt) : "default"),
+		format: (settings) => (settings.tidyPrompt ? basename(settings.tidyPrompt) : "default"),
 		parse: (text) => {
 			const value = text.trim();
-			if (["default", "none", "off", ""].includes(value.toLowerCase())) return { compactPrompt: null };
-			return { compactPrompt: value };
+			if (["default", "none", "off", ""].includes(value.toLowerCase())) return { tidyPrompt: null };
+			return { tidyPrompt: value };
 		},
 	},
 ];
@@ -305,12 +305,12 @@ const ALIASES: Record<string, ClmSettingKey> = {
 	onetool: "oneTool",
 	trailer: "trailer",
 	"size-trailer": "trailer",
-	"compact-prompt": "compactPrompt",
+	"tidy-prompt": "tidyPrompt",
 };
 
 /** Keys users type in `/clm config <key> <value>`. */
 export const CLM_SETTING_COMMAND_KEYS = [
-	"budget", "reserve", "reminders", "guard", "compaction", "cap", "steering", "one-tool", "trailer", "compact-prompt",
+	"budget", "reserve", "reminders", "guard", "compaction", "cap", "steering", "one-tool", "trailer", "tidy-prompt",
 ] as const;
 
 export function settingDescriptor(name: string): ClmSettingDescriptor | undefined {

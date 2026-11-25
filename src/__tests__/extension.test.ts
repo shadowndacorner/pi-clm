@@ -1421,17 +1421,17 @@ describe("pi-clm entry point", () => {
 		} finally { await emit(harness, "session_shutdown", {}); }
 	});
 
-	test("CLM: /clm-compact sends a fixed prompt asking the model to compact its own context", async (t) => {
+	test("CLM: /clm-tidy sends a fixed prompt asking the model to compact its own context", async (t) => {
 		const harness = createHarness();
 		liveContextExtension(harness.pi, { editingMode: "clm", budget: { contextBudget: 100_000 } });
 		harness.ctx.model = { contextWindow: 200_000 };
 		harness.ctx.getSystemPrompt = () => "";
 		await emit(harness, "session_start", { reason: "startup" });
 		try {
-			const compact = (args: string) => harness.commands.get("clm-compact").handler(args, harness.ctx);
-			assert.ok(harness.commands.has("clm-compact"), "a top-level command, so completion lists it beside Pi's /compact");
+			const compact = (args: string) => harness.commands.get("clm-tidy").handler(args, harness.ctx);
+			assert.ok(harness.commands.has("clm-tidy"), "a top-level command, so completion lists it beside Pi's /compact");
 			await compact("");
-			assert.match(harness.notifications.at(-1)!, /Nothing to compact yet/);
+			assert.match(harness.notifications.at(-1)!, /Nothing to tidy yet/);
 			assert.equal(harness.sentUserMessages.length, 0);
 
 			await emit(harness, "context", { messages: [{ role: "user", content: "x".repeat(40_000), timestamp: 1 }] });
@@ -1444,7 +1444,7 @@ describe("pi-clm entry point", () => {
 			assert.match(prompt, /^Free room in your live context/);
 			assert.ok(prompt.includes(`about 10k tokens (budget 100k). Your context is mirrored at \`${mirror}\``), prompt);
 			assert.doesNotMatch(prompt, /\{\{|Also:/);
-			assert.match(harness.notifications.at(-1)!, /Asked the model to compact its context \(now about 10k tokens\)/);
+			assert.match(harness.notifications.at(-1)!, /Asked the model to tidy its context \(now about 10k tokens\)/);
 
 			await compact("keep the PR numbers");
 			assert.match(String(harness.sentUserMessages.at(-1)!.content), /\n\nAlso: keep the PR numbers\n\n/);
@@ -1458,14 +1458,14 @@ describe("pi-clm entry point", () => {
 			assert.equal(harness.sentUserMessages.at(-1)!.options, undefined);
 
 			// A custom template replaces the prompt; a file that cannot be read is rejected when it is set.
-			const directory = await mkdtemp(join(tmpdir(), "clm-compact-"));
+			const directory = await mkdtemp(join(tmpdir(), "clm-tidy-"));
 			t.after(() => rm(directory, { recursive: true, force: true }));
 			const template = join(directory, "compact.md");
 			await writeFile(template, "Shrink {{mirror}} ({{current}}). {{instructions}}");
-			await harness.commands.get("clm").handler(`config compact-prompt ${template}`, harness.ctx);
-			assert.match(harness.notifications.at(-1)!, /CLM Compact prompt: compact\.md\./);
-			await harness.commands.get("clm").handler("config compact-prompt /nonexistent/compact.md", harness.ctx);
-			assert.match(harness.notifications.at(-1)!, /compact prompt not loaded/);
+			await harness.commands.get("clm").handler(`config tidy-prompt ${template}`, harness.ctx);
+			assert.match(harness.notifications.at(-1)!, /CLM Tidy prompt: compact\.md\./);
+			await harness.commands.get("clm").handler("config tidy-prompt /nonexistent/compact.md", harness.ctx);
+			assert.match(harness.notifications.at(-1)!, /tidy prompt not loaded/);
 			await compact("tidy up");
 			assert.equal(String(harness.sentUserMessages.at(-1)!.content), `Shrink ${mirror} (10k). Also: tidy up`);
 
@@ -1476,7 +1476,7 @@ describe("pi-clm entry point", () => {
 		} finally { await emit(harness, "session_shutdown", {}); }
 	});
 
-	test("CLM: /clm-compact estimates a resumed context whose last usage predates its checkpoint", async () => {
+	test("CLM: /clm-tidy estimates a resumed context whose last usage predates its checkpoint", async () => {
 		const raw: LiveContextMessage[] = [
 			{ role: "user", content: "x".repeat(40_000), timestamp: 1 },
 			{ role: "assistant", content: [{ type: "text", text: "done" }], api: "test", provider: "test", model: "test", stopReason: "stop", timestamp: 2, usage: { input: 10_000, output: 10, cacheRead: 0, cacheWrite: 0, totalTokens: 10_010, cost: { total: 0 } } } as any,
@@ -1498,13 +1498,13 @@ describe("pi-clm entry point", () => {
 		liveContextExtension(harness.pi, { editingMode: "clm" });
 		await emit(harness, "session_start", { reason: "resume" });
 		try {
-			await harness.commands.get("clm-compact").handler("", harness.ctx);
+			await harness.commands.get("clm-tidy").handler("", harness.ctx);
 			assert.equal(harness.sentUserMessages.length, 1, "a nonempty restored context is compacted");
 			assert.match(String(harness.sentUserMessages[0]!.content), /about 3\.5k tokens/);
 		} finally { await emit(harness, "session_shutdown", {}); }
 	});
 
-	test("CLM: a waiting /clm-compact is dropped if the context changes, and a second one is refused", async () => {
+	test("CLM: a waiting /clm-tidy is dropped if the context changes, and a second one is refused", async () => {
 		const harness = createHarness();
 		harness.ctx.model = { contextWindow: 100_000 };
 		harness.ctx.getSystemPrompt = () => "";
@@ -1517,14 +1517,14 @@ describe("pi-clm entry point", () => {
 			harness.ctx.waitForIdle = () => new Promise<void>((resolve) => { release = resolve; });
 
 			// A branch switch while waiting: nothing is sent into the new branch.
-			const stale = harness.commands.get("clm-compact").handler("keep original branch facts", harness.ctx);
+			const stale = harness.commands.get("clm-tidy").handler("keep original branch facts", harness.ctx);
 			await emit(harness, "session_tree", {});
 			await emit(harness, "context", { messages: [{ role: "user", content: "different branch", timestamp: 2 }] });
 			harness.ctx.isIdle = () => true;
 			release();
 			await stale;
 			assert.equal(harness.sentUserMessages.length, 0);
-			assert.match(harness.notifications.at(-1)!, /live context changed while \/clm-compact was waiting/);
+			assert.match(harness.notifications.at(-1)!, /live context changed while \/clm-tidy was waiting/);
 
 			// Two while one run is busy: Pi still reports idle for a moment after the first send, so a
 			// second send would throw "Agent is already processing a prompt"; it is refused instead.
@@ -1536,8 +1536,8 @@ describe("pi-clm entry point", () => {
 			};
 			harness.ctx.isIdle = () => false;
 			harness.ctx.waitForIdle = () => new Promise<void>((resolve) => { release = resolve; });
-			const first = harness.commands.get("clm-compact").handler("", harness.ctx);
-			await harness.commands.get("clm-compact").handler("", harness.ctx);
+			const first = harness.commands.get("clm-tidy").handler("", harness.ctx);
+			await harness.commands.get("clm-tidy").handler("", harness.ctx);
 			assert.match(harness.notifications.at(-1)!, /already waiting for the current run/);
 			harness.ctx.isIdle = () => true;
 			release();
@@ -1546,26 +1546,26 @@ describe("pi-clm entry point", () => {
 
 			// A send Pi refuses anyway is reported, not thrown.
 			harness.ctx.waitForIdle = async () => {};
-			await harness.commands.get("clm-compact").handler("", harness.ctx);
-			assert.match(harness.notifications.at(-1)!, /\/clm-compact was not sent: Agent is already processing a prompt/);
+			await harness.commands.get("clm-tidy").handler("", harness.ctx);
+			assert.match(harness.notifications.at(-1)!, /\/clm-tidy was not sent: Agent is already processing a prompt/);
 		} finally { await emit(harness, "session_shutdown", {}); }
 	});
 
-	test("CLM: PI_CLM_COMPACT_PROMPT sets the default compact prompt", async () => {
-		const saved = process.env.PI_CLM_COMPACT_PROMPT;
+	test("CLM: PI_CLM_TIDY_PROMPT sets the default tidy prompt", async () => {
+		const saved = process.env.PI_CLM_TIDY_PROMPT;
 		try {
 			for (const [value, shown] of [["/somewhere/team-compact.md", "team-compact.md"], ["default", "default"], ["none", "default"]] as const) {
-				process.env.PI_CLM_COMPACT_PROMPT = value;
+				process.env.PI_CLM_TIDY_PROMPT = value;
 				const harness = createHarness();
 				clmExtension(harness.pi);
 				await emit(harness, "session_start", { reason: "startup" });
 				try {
-					assert.match(await clmSettingsText(harness), new RegExp(`Compact prompt +${shown.replace(".", "\\.")}\\n`), value);
+					assert.match(await clmSettingsText(harness), new RegExp(`Tidy prompt +${shown.replace(".", "\\.")}\\n`), value);
 				} finally { await emit(harness, "session_shutdown", {}); }
 			}
 		} finally {
-			if (saved === undefined) delete process.env.PI_CLM_COMPACT_PROMPT;
-			else process.env.PI_CLM_COMPACT_PROMPT = saved;
+			if (saved === undefined) delete process.env.PI_CLM_TIDY_PROMPT;
+			else process.env.PI_CLM_TIDY_PROMPT = saved;
 		}
 	});
 

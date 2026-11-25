@@ -1,6 +1,6 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { budgetPolicyFromEnv, estimateFactorFromEnv } from "./src/budget.ts";
-import { compactPromptFromEnv } from "./src/compact.ts";
+import { tidyPromptFromEnv } from "./src/tidy.ts";
 import liveContextExtension from "./src/index.ts";
 import { observationCapFromEnv } from "./src/observation.ts";
 import { overflowGuardFromEnv } from "./src/overflow.ts";
@@ -25,7 +25,7 @@ import { steeringPathFromEnv } from "./src/steering.ts";
  * - PI_CLM_ONE_TOOL_PER_TURN=1 — paper-harness parity: block every tool call after the first in
  *   an assistant turn. PI_CLM_SIZE_TRAILER=1 — append "[context: ~N of B tokens]" to each tool
  *   result, as the paper's harness does.
- * - PI_CLM_COMPACT_PROMPT — markdown template `/clm-compact` sends instead of the built-in
+ * - PI_CLM_TIDY_PROMPT — markdown template `/clm-tidy` sends instead of the built-in
  *   prompt ({{mirror}} {{current}} {{budget}} {{instructions}}); "default"/"none"/"off" = built in.
  * - PI_CLM_NATIVE_COMPACTION — "auto" (default): cancel Pi's threshold compaction while a
  *   budget is enforced by the overflow guard; "off": cancel all automatic compaction;
@@ -53,6 +53,6 @@ export default function clmExtension(pi: ExtensionAPI): void {
 		estimateFactor: estimateFactorFromEnv(),
 		oneToolPerTurn: flagFromEnv("PI_CLM_ONE_TOOL_PER_TURN"),
 		sizeTrailer: flagFromEnv("PI_CLM_SIZE_TRAILER"),
-		compactPromptPath: compactPromptFromEnv(),
+		tidyPromptPath: tidyPromptFromEnv(),
 	});
 }

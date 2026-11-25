@@ -45,7 +45,7 @@ outrun any reminder:
 
 Pi's automatic compaction is paused in CLM mode; it measures the raw transcript and would
 discard the model's edits. Manual `/compact` still works, but it summarizes the raw
-history and resets the projection; `/clm-compact` instead asks the model to do the
+history and resets the projection; `/clm-tidy` instead asks the model to do the
 compaction by editing its mirror, with a fixed prompt you can replace.
 
 ## The panel

@@ -55,7 +55,7 @@ import type { ContextEditSourceKind, ContextEditTrace, LiveContextMessage } from
 export const LIVE_CONTEXT_VIEW_TABS = ["overview", "edit", "projection", "tree", "history", "agents"] as const;
 /**
  * CLM panel (`/clm`): four pages. `overview` is the context-size timeline with its
- * compaction points; `input` is the current effective context with the savings bar;
+ * edit points; `input` is the current effective context with the savings bar;
  * `edits` is the per-revision diff; `settings` shows sizes and edits the CLM settings.
  * The conservative-mode tree/history/agents tabs are not offered.
  */
@@ -83,7 +83,7 @@ export interface ViewerSettingsController {
 }
 /**
  * `timeline` remains a standalone tab id for hosts that want it beside the conservative tabs.
- * CLM ids: `overview` = timeline + compaction points, `input` = the current effective
+ * CLM ids: `overview` = timeline + edit points, `input` = the current effective
  * context (the `projection` page plus the savings bar), `edits` = the `edit` page.
  */
 export type LiveContextViewTab = (typeof LIVE_CONTEXT_VIEW_TABS)[number] | (typeof CLM_VIEW_TABS)[number] | "timeline";
@@ -1279,7 +1279,7 @@ export class LiveContextViewer implements Component {
 	/**
 	 * Selected stop on the timeline: an index into `timeline.markers`, or
 	 * `markers.length` for "now" (the latest request). Resolved on first use to "now", so
-	 * the chart opens on the current position rather than the oldest compaction point.
+	 * the chart opens on the current position rather than the oldest edit point.
 	 */
 	private timelineSelection: number | undefined;
 	/**
@@ -1510,7 +1510,7 @@ export class LiveContextViewer implements Component {
 		return this.resolveTimelineSelection() === this.model.timeline.markers.length;
 	}
 
-	/** ← → step through compaction points; the last stop after the newest point is "now". */
+	/** ← → step through edit points; the last stop after the newest point is "now". */
 	private moveTimelineSelection(delta: number): void {
 		const now = this.model.timeline.markers.length;
 		this.timelineSelection = Math.max(0, Math.min(now, this.resolveTimelineSelection() + delta));
@@ -1691,7 +1691,7 @@ export class LiveContextViewer implements Component {
 		];
 	}
 
-	/** CLM overview: the context-size timeline and its compaction points. */
+	/** CLM overview: the context-size timeline and its edit points. */
 	private clmOverviewLines(width: number): string[] {
 		const model = this.model;
 		// Only say something above the chart when it is not the normal state; the title
