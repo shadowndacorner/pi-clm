@@ -129,6 +129,16 @@ describe("checked patch helper (clm-tidy)", () => {
 		assert.ok(!after.includes(`id=${target.id} `));
 		assert.equal(after.split("\n").filter((line) => line.startsWith("[[CTX_TURN ")).length, snapshot.blocks.length - 1);
 	});
+	test("one --drop may name several ids comma-separated", () => {
+		const { snapshot, file } = fixture();
+		const ids = snapshot.blocks.slice(2, 4).map((block) => block.id);
+		const applied = run(["--file", file, "--drop", ids.join(",")]);
+		assert.equal(applied.status, 0, applied.stdout + applied.stderr);
+		const after = readFileSync(file, "utf8");
+		for (const id of ids) assert.ok(!after.includes(`id=${id} `), `still present: ${id}`);
+		assert.equal(after.split("\n").filter((line) => line.startsWith("[[CTX_TURN ")).length, snapshot.blocks.length - ids.length);
+	});
+
 	test("refuses to delete an owner turn", () => {
 		const { snapshot, file } = fixture();
 		const ownerTurn = snapshot.blocks.find((block) => block.role === "user" && block.body.includes("now sort them"))!;

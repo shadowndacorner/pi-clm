@@ -136,6 +136,9 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--drop", action="append", default=[], metavar="ID", help="remove one whole block (header + body)")
     parser.add_argument("--dry-run", action="store_true", help="report the result without writing")
     args = parser.parse_args(argv)
+    # Accept a comma-separated list in one --drop: dropping many blocks is the
+    # common case and repeating the flag for each is easy to get wrong.
+    args.drop = [part for value in args.drop for part in value.split(",") if part.strip()]
 
     try:
         text = open(args.file, "r", encoding="utf-8").read()
