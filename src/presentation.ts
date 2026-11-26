@@ -104,7 +104,9 @@ export function editShapeText(
 				break;
 		}
 	}
-	const parts = [`${kept} kept`, `${inPlace} shortened in place`, `${dropped} dropped`, `${trace.additions.length} added`];
+	// "edited in place", not "shortened": an in-place edit may grow a body. The token delta
+	// beside this report says which way it went.
+	const parts = [`${kept} kept`, `${inPlace} edited in place`, `${dropped} dropped`, `${trace.additions.length} added`];
 	if (restored > 0) parts.push(`${restored} restored`);
 	const collapsed = diagnostics.some((line) => /full rewrite|headerless rewrite/i.test(line));
 	return `${collapsed ? "FULL REWRITE — " : ""}context shape: ${parts.join(", ")} (from ${trace.sourceMessageCount} blocks)`;

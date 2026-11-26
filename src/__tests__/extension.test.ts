@@ -942,7 +942,7 @@ describe("pi-clm entry point", () => {
 				.filter((message: LiveContextMessage) => message.customType === "live-context-notice")
 				.map((message: LiveContextMessage) => String(message.content));
 			assert.ok(
-				notices.some((text: string) => /context shape: \d+ kept, \d+ shortened in place, \d+ dropped, \d+ added/.test(text)),
+				notices.some((text: string) => /context shape: \d+ kept, \d+ edited in place, \d+ dropped, \d+ added/.test(text)),
 				`the acceptance notice must report block shape, not only a size delta: ${notices.join(" | ")}`,
 			);
 			const resumed = createHarness([...harness.branch]);

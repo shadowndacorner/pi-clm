@@ -29,7 +29,7 @@ SHAPES = (
     "single-body edit, nothing removed",
     "multi-body edit with survivors",
     "majority of blocks destroyed",
-    "full rewrite (<=3 output blocks)",
+    "collapse-shaped output (<=3 blocks)",
     "no-op re-render",
     "other",
 )
@@ -52,7 +52,7 @@ def classify(sources: list[dict], inputs: int, outputs: int) -> str:
     edited = kinds["edited"] + kinds["normalized"]
     removed = kinds["removed"]
     if outputs <= 3 and inputs >= 6:
-        return "full rewrite (<=3 output blocks)"
+        return "collapse-shaped output (<=3 blocks)"
     if inputs >= 6 and removed >= 0.5 * inputs:
         return "majority of blocks destroyed"
     if edited == 1 and removed == 0 and not kinds["added"]:
@@ -103,7 +103,7 @@ def audit(paths: list[str]) -> int:
         count = shapes[shape]
         if count:
             print(f"  {shape:38} {count:5}  ({100 * count / accepted:.0f}%)")
-    destroyed = shapes["majority of blocks destroyed"] + shapes["full rewrite (<=3 output blocks)"]
+    destroyed = shapes["majority of blocks destroyed"] + shapes["collapse-shaped output (<=3 blocks)"]
     if accepted:
         print(f"  {'edits destroying >=half the blocks':38} {destroyed:5}  ({100 * destroyed / accepted:.0f}%)")
     if untouched:

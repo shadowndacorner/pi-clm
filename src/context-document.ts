@@ -36,6 +36,8 @@ interface ParsedDocument {
 	malformedCurrentHeaders: string[];
 	/** Header-shaped lines that are not valid headers of the current document (stale nonce, malformed, foreign). */
 	unrecognizedHeaderLines: string[];
+	/** Foreign-revision headers that name a block of this document: a stale retype that would silently delete it. */
+	foreignHeadersOfLiveBlocks: string[];
 }
 
 function normalizeJson(value: unknown): unknown {
@@ -221,6 +223,10 @@ export function renderContextDocument(
 	};
 }
 
+/** A structurally valid header for some other document (its nonce differs from the current one). */
+const FOREIGN_HEADER_RE =
+	/^\[\[CTX_TURN document=([0-9a-f]{64}) index=\d+ role=[A-Za-z][A-Za-z0-9_-]* id=([a-zA-Z0-9-]+) protected=(true|false)\]\]$/;
+
 function parseDocument(text: string, snapshot: ContextDocumentSnapshot): ParsedDocument {
 	const metadata = META_RE.exec(text);
 	const blockRe = new RegExp(
@@ -261,6 +267,18 @@ function parseDocument(text: string, snapshot: ContextDocumentSnapshot): ParsedD
 		.split(/\r?\n/)
 		.map((line) => line.trim())
 		.filter((line) => line.startsWith("[[CTX_TURN ") && !validHeaderLines.has(line));
+	// A rendered-form header from another revision that stands in where a block's own header
+	// should be is a re-typed header: the parser cannot frame it, so that block would be
+	// silently treated as deleted. The same line inside a body (a captured header list, parser
+	// documentation) is ordinary content — the block it names is still framed above it.
+	const parsedIds = new Set(blocks.map((block) => block.id));
+	const foreignHeadersOfLiveBlocks = text
+		.split(/\r?\n/)
+		.filter((line) => {
+			if (!line.startsWith("[[CTX_TURN document=") || validHeaderLines.has(line.trim())) return false;
+			const match = FOREIGN_HEADER_RE.exec(line);
+			return match !== null && match[1] !== snapshot.documentId && snapshot.blocks.some((block) => block.id === match[2]) && !parsedIds.has(match[2]);
+		});
 
 	const metadataEnd = metadata ? metadata[0].length : 0;
 	const firstBlockStart = matches[0]?.index ?? text.length;
@@ -281,6 +299,7 @@ function parseDocument(text: string, snapshot: ContextDocumentSnapshot): ParsedD
 		duplicateIds,
 		malformedCurrentHeaders,
 		unrecognizedHeaderLines,
+		foreignHeadersOfLiveBlocks,
 	};
 }
 
@@ -548,9 +567,10 @@ export function applyContextDocument(
 			sourceMessageCount: snapshot.messages.length,
 			outputMessageCount: messages.length,
 			sources: tracedSources,
-			additions: candidateOrigins.flatMap((origin, outputIndex) =>
-				origin.sourceIndex === undefined ? [{ outputIndex, kind: "added" as const }] : [],
-			),
+			additions: repaired.provenance.flatMap((candidateIndex, outputIndex) => {
+				const origin = candidateOrigins[candidateIndex];
+				return origin && origin.sourceIndex === undefined ? [{ outputIndex, kind: "added" as const }] : [];
+			}),
 		};
 
 		return {
@@ -579,9 +599,20 @@ export function applyContextDocument(
 			beforeEstimate,
 			`Mirror carries ${parsed.unrecognizedHeaderLines.length} block header(s) from another context revision and no current ones, so it looks like a stale edit rather than a rewrite: ${example.slice(0, 120)}. ` +
 				`Re-read the first line of the mirror and its headers, then re-apply the edit against revision ${snapshot.revision}. ` +
+				`A header from another revision silently deletes the block it named, so none are accepted. ` +
 				`To replace the whole context on purpose, remove every [[CTX_TURN ...]] header line.`,
 		);
 	}
+	// A re-typed header among valid ones must not be allowed to delete its block quietly.
+	if (parsed.foreignHeadersOfLiveBlocks.length > 0) {
+		return rejected(
+			snapshot,
+			beforeEstimate,
+			`Mirror carries ${parsed.foreignHeadersOfLiveBlocks.length} block header(s) from another context revision that name blocks of this one: ${(parsed.foreignHeadersOfLiveBlocks[0] ?? "").slice(0, 120)}. ` +
+				`Such a header does not frame the block, so the block would be dropped — re-read the mirror's headers and re-apply the edit against revision ${snapshot.revision}.`,
+		);
+	}
+
 	// CLM: a file with no header-shaped lines at all is the model replacing its whole
 	// context with free text (the paper's "collapse to a summary" move). Accept it as one
 	// notes block, but keep every owner (user) turn: a collapse may summarise everything the

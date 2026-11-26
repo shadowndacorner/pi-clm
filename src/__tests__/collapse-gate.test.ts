@@ -85,6 +85,35 @@ describe("headerless collapse gate (CLM mode)", () => {
 		assert.match(result.reason ?? "", /malformed|stale/i, result.reason);
 	});
 
+	test("one re-typed header among valid ones is rejected rather than quietly deleting its block", () => {
+		const current = renderContextDocument(conversation(), { revision: 0, protectedIndexes: new Set(), documentSeed: "s" });
+		const older = renderContextDocument(conversation(), { revision: 0, protectedIndexes: new Set(), documentSeed: "older" });
+		const currentHeaders = current.text.split("\n").filter((line) => line.startsWith("[[CTX_TURN document="));
+		const olderHeaders = older.text.split("\n").filter((line) => line.startsWith("[[CTX_TURN document="));
+		// A model that re-typed one header from an earlier read: the rest are current.
+		const swapped = current.text.replace(currentHeaders[2]!, olderHeaders[2]!);
+		const result = applyContextDocument(swapped, current, clm);
+		assert.notEqual(currentHeaders[2], olderHeaders[2], "fixture must actually swap a header");
+		assert.equal(result.accepted, false, result.reason);
+		assert.match(result.reason ?? "", /another context revision|would be dropped/i, result.reason);
+	});
+
+	test("a header list quoted inside a body stays content when its blocks are still framed", () => {
+		const messages: LiveContextMessage[] = [
+			{ role: "user", content: "task", timestamp: 1 },
+			{ role: "assistant", content: [{ type: "text", text: "done" }], timestamp: 2 } as LiveContextMessage,
+			{ role: "custom", customType: "header-list", content: "", display: false, timestamp: 3 } as LiveContextMessage,
+		];
+		const snapshot = renderContextDocument(messages, { revision: 1, protectedIndexes: new Set(), documentSeed: "s" });
+		const quoted = snapshot.blocks
+			.map((block) => block.header.replace(`document=${snapshot.documentId}`, `document=${"f".repeat(64)}`))
+			.join("\n");
+		const insertAt = snapshot.text.indexOf("\n\n") + 2;
+		const withQuoted = `${snapshot.text.slice(0, insertAt)}quoted headers:\n${quoted}\n${snapshot.text.slice(insertAt)}`;
+		const result = applyContextDocument(withQuoted, snapshot, clm);
+		assert.equal(result.accepted, true, result.reason);
+	});
+
 	test("a headerless rewrite remains available and keeps every owner turn", () => {
 		const current = renderContextDocument(conversation(), { revision: 0, protectedIndexes: new Set(), documentSeed: "s" });
 		const summary = "# Context Summary\n## Found so far\n- SECRET=42\n## Next\n- write the report";

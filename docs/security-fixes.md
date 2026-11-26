@@ -1,6 +1,6 @@
 # Fork hardening, November 2026
 
-This fork preserves skill evolution and adds two fixes to blackcandlelabs revision 379180435375fa6d895973a927b8222a82a9cb68:
+This fork preserves skill evolution and adds two fixes on top of revision 379180435375fa6d895973a927b8222a82a9cb68:
 
 - Edited tool results retain their source-backed call ID, tool name and error status, even when blocks are reordered. New model-authored notes cannot acquire a call ID by position. Rewritten results carry `details.clmEdited=true`.
 - Session startup awaits required-child-extension registration. Disposal invalidates in-flight resolution; a new session replaces the previous registration, and stale asynchronous work cannot overwrite it.

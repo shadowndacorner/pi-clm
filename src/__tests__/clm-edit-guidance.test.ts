@@ -152,6 +152,36 @@ describe("checked patch helper (clm-tidy)", () => {
 		assert.ok(after.includes("[[CTX_TURN ... id=41 role=toolResult"), "the example inside the body is kept");
 		assert.ok(after.includes("wc: 400 lines"));
 	});
+	test("a malformed header line is refused cleanly, not a crash", () => {
+		const { snapshot, file } = fixture();
+		const broken = snapshot.text.replace(" role=assistant ", " role=assistant missing=true ");
+		writeFileSync(file, broken);
+		const result = run(["--file", file, "--patch", `${snapshot.blocks[2]!.id}=x`]);
+		assert.notEqual(result.status, 0, result.stdout + result.stderr);
+		assert.doesNotMatch(result.stderr, /Traceback/, result.stderr);
+		assert.match(`${result.stderr}${result.stdout}`.toLowerCase(), /malformed|header/);
+	});
+
+	test("the preamble comment survives and the size report counts the pre-patch state", () => {
+		const { snapshot, file } = fixture();
+		const target = snapshot.blocks[2]!;
+		const result = run(["--file", file, "--patch", `${target.id}=wc: 400 lines`]);
+		assert.equal(result.status, 0, result.stdout + result.stderr);
+		const after = readFileSync(file, "utf8");
+		assert.match(after, /# Edit bodies or delete editable CTX_TURN blocks/, "the leading comment must survive");
+		const sizes = /([0-9]+) -> ([0-9]+) characters/.exec(result.stdout);
+		assert.ok(sizes, result.stdout);
+		assert.ok(Number(sizes![1]) > Number(sizes![2]), `a trim must report a larger before size: ${result.stdout}`);
+	});
+
+	test("an owner turn may be rewritten but never deleted", () => {
+		const { snapshot, file } = fixture();
+		const owner = snapshot.blocks.find((block) => block.role === "user" && block.body.includes("now sort them"))!;
+		const rewritten = run(["--file", file, "--patch", `${owner.id}=[requirement withdrawn by the owner]`]);
+		assert.equal(rewritten.status, 0, rewritten.stdout + rewritten.stderr);
+		assert.match(readFileSync(file, "utf8"), /requirement withdrawn by the owner/);
+	});
+
 	test("--list prints only the metadata line and current headers", () => {
 		const { snapshot, file } = fixture();
 		const result = run(["--file", file, "--list"]);
@@ -180,7 +210,7 @@ describe("edit shape reporting", () => {
 	test("reports block shape alongside the size delta", () => {
 		const text = editShapeText(trace)!;
 		assert.match(text, /2 kept/i);
-		assert.match(text, /2 shortened in place/i);
+		assert.match(text, /2 edited in place/i);
 		assert.match(text, /1 dropped/i);
 	});
 	test("names a full rewrite when the collapse path fired", () => {

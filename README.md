@@ -16,16 +16,18 @@ codebase](https://github.com/facebookresearch/context-language-models).
 
 ## Install
 
-This fork (blackcandlelabs/pi-clm) extends upstream with in-context skill
-evolution, regression evals, engine fixes, skill wiring and multi-agent
-context coexistence — see the feature sections below.
+This fork (`shadowndacorner/pi-clm`) extends the starting-point project with
+in-context skill evolution, regression evals, engine fixes, skill wiring,
+multi-agent context coexistence and the self-editing protocol described below —
+see the feature sections. Install from this repository; upstream is not a
+deployment target.
 
 ```sh
 # this fork, from source (pick one):
-pi install git:github.com/blackcandlelabs/pi-clm
-pi -e git:github.com/blackcandlelabs/pi-clm        # one session, no install
+pi install git:github.com/shadowndacorner/pi-clm
+pi -e git:github.com/shadowndacorner/pi-clm       # one session, no install
 
-# upstream v1.0.0 (no fork features):
+# the starting point, v1.0.0 (none of the above):
 pi install npm:@lolipopshock/pi-clm
 ```
 
@@ -55,8 +57,8 @@ the live smoke: [docs/multiagent.md](docs/multiagent.md), and
 `scripts/live-coexistence-smoke.sh` runs the real-model check.
 
 In this fork the loop ships in the package; `pi install
-git:github.com/blackcandlelabs/pi-clm` or `pi -e
-git:github.com/blackcandlelabs/pi-clm`; the npm command below installs
+git:github.com/shadowndacorner/pi-clm` or `pi -e
+git:github.com/shadowndacorner/pi-clm`; the npm command below installs
 upstream instead.
 
 ## In-context skill evolution (fork feature)

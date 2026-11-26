@@ -87,6 +87,29 @@ describe("edit trace alignment after tool-group repair", () => {
 		assertTraceAlignsWithOutput(result, snapshot);
 	});
 
+	test("an added notes block is traced to the projection that will be sent", () => {
+		const snapshot = snapshotOf(conversation());
+		// Drop one side of the first group (repair removes the whole group) and add a note.
+		const dropped = dropBlockById(snapshot, blockId(snapshot, 2));
+		const edited = `${dropped}\n\n[[CTX_TURN document=${snapshot.documentId} index=99 role=notes id=new-tracker protected=false]]\nkey fact: 7`;
+		const result = applyContextDocument(edited, snapshot, clm);
+
+		assert.equal(result.accepted, true, result.reason);
+		const trace = result.editTrace;
+		assert.ok(trace?.additions.length, "the new block must be traced as an addition");
+		for (const addition of trace?.additions ?? []) {
+			assert.ok(
+				addition.outputIndex < result.messages.length,
+				`addition outputIndex ${addition.outputIndex} is outside the ${result.messages.length}-message projection`,
+			);
+			assert.match(
+				JSON.stringify(result.messages[addition.outputIndex]?.content ?? ""),
+				/key fact: 7/,
+				"the addition must point at the note it added",
+			);
+		}
+	});
+
 	test("an orphaned tool result is dropped and later trace entries stay aligned", () => {
 		const snapshot = snapshotOf(conversation());
 		// Drop the assistant side of the second group: repair must drop its orphaned result.

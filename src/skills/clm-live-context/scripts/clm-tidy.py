@@ -52,7 +52,7 @@ class Block:
         return len(self.header) + len(self.body)
 
 
-def load(text: str) -> tuple[str, dict, list[Block]]:
+def load(text: str) -> tuple[str, str, dict, list[Block]]:
     lines = text.split("\n")
     if not lines or not META_RE.match(lines[0].strip()):
         raise MirrorError(
@@ -71,7 +71,7 @@ def load(text: str) -> tuple[str, dict, list[Block]]:
             header = HEADER_RE.match(line.strip())
             if not header:
                 raise MirrorError(
-                    f"malformed block header: {stripped[:120]}\n"
+                    f"malformed block header: {line[:120]}\n"
                     "copy headers verbatim from the current file; do not retype them"
                 )
             if header.group(1) != nonce:
@@ -90,11 +90,14 @@ def load(text: str) -> tuple[str, dict, list[Block]]:
     duplicates = sorted({block_id for block_id in ids if ids.count(block_id) > 1})
     if duplicates:
         raise MirrorError(f"duplicate block ids in the mirror: {', '.join(duplicates)}")
-    return lines[0], {"nonce": nonce, "revision": int(meta.group(2))}, blocks
+    preamble = "\n".join(lines[1:]).split("[[CTX_TURN document=")[0].rstrip("\n") if len(lines) > 1 else ""
+    return lines[0], preamble, {"nonce": nonce, "revision": int(meta.group(2))}, blocks
 
 
-def render(meta_line: str, blocks: list[Block]) -> str:
+def render(meta_line: str, preamble: str, blocks: list[Block]) -> str:
     parts = [meta_line]
+    if preamble:
+        parts.append(preamble)
     for block in blocks:
         parts.append("")
         parts.append(block.header)
@@ -111,12 +114,12 @@ def find(blocks: list[Block], block_id: str) -> Block:
     raise MirrorError(f"no block with id {block_id}. Current ids: {known}")
 
 
-def shape_report(before: list[Block], after: list[Block], patched: list[str], dropped: list[str]) -> str:
+def shape_report(before_sizes: list[int], after: list[Block], patched: list[str], dropped: list[str]) -> str:
     kept_ids = {block.id for block in after} - set(patched)
     return (
         f"shape: {len(kept_ids)} kept untouched, {len(patched)} shortened in place, "
         f"{len(dropped)} dropped, {len(after)} blocks total; "
-        f"{sum(block.size() for block in before)} -> {sum(block.size() for block in after)} characters"
+        f"{sum(before_sizes)} -> {sum(block.size() for block in after)} characters"
     )
 
 
@@ -136,7 +139,7 @@ def main(argv: list[str]) -> int:
         return 2
 
     try:
-        meta_line, _, blocks = load(text)
+        meta_line, preamble, _, blocks = load(text)
     except MirrorError as error:
         print(f"refusing to patch: {error}", file=sys.stderr)
         return 2
@@ -151,7 +154,7 @@ def main(argv: list[str]) -> int:
         print("nothing to do: pass --patch ID=BODY and/or --drop ID (or --list)", file=sys.stderr)
         return 2
 
-    before = list(blocks)
+    before_sizes = [block.size() for block in blocks]
     patched: list[str] = []
     dropped: list[str] = []
     remaining = list(blocks)
@@ -161,11 +164,6 @@ def main(argv: list[str]) -> int:
             if not body.strip():
                 raise MirrorError(f"--patch {block_id}: an empty body deletes a block; use --drop {block_id} to mean that")
             block = find(remaining, block_id.strip())
-            if block.role == "user":
-                raise MirrorError(
-                    f"block {block_id} is an owner turn; rewrite its body only to record what the owner said, "
-                    "and never delete an owner turn"
-                )
             block.body_lines = [body.strip()]
             patched.append(block.id)
         for block_id in args.drop:
@@ -181,14 +179,27 @@ def main(argv: list[str]) -> int:
         print(f"refusing to patch: {error}", file=sys.stderr)
         return 2
 
-    out = render(meta_line, remaining)
-    print(shape_report(before, remaining, patched, dropped))
+    out = render(meta_line, preamble, remaining)
+    print(shape_report(before_sizes, remaining, patched, dropped))
     print(f"headers after: {len(remaining)}")
     if args.dry_run:
         for block in remaining:
             print(f"  {block.header}")
         print("(dry run: the mirror was not written)")
         return 0
+
+    try:
+        current = open(args.file, "r", encoding="utf-8").read()
+    except OSError as error:
+        print(f"cannot re-read {args.file}: {error}", file=sys.stderr)
+        return 2
+    if current != text:
+        print(
+            "refusing to write: the mirror changed after it was read (another writer, or a re-render at the "
+            "start of the next request). Re-run the patch against the current file.",
+            file=sys.stderr,
+        )
+        return 2
 
     directory = os.path.dirname(os.path.abspath(args.file)) or "."
     handle = tempfile.NamedTemporaryFile("w", dir=directory, prefix=".clm-tidy-", delete=False)
