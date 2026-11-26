@@ -110,8 +110,13 @@ def find(blocks: list[Block], block_id: str) -> Block:
     for block in blocks:
         if block.id == block_id:
             return block
-    known = ", ".join(f"{block.id}({block.role})" for block in blocks)
-    raise MirrorError(f"no block with id {block_id}. Current ids: {known}")
+    # Bound the id list: an unknown id in a large mirror must not answer with a
+    # dump that costs more than the edit it is trying to make.
+    shown = ", ".join(f"{block.id}({block.role})" for block in blocks[:40])
+    more = len(blocks) - 40
+    if more > 0:
+        shown += f", … {more} more (re-run --list for all)"
+    raise MirrorError(f"no block with id {block_id}. Current ids: {shown}")
 
 
 def shape_report(before_sizes: list[int], after: list[Block], patched: list[str], dropped: list[str]) -> str:
