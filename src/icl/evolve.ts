@@ -2,7 +2,7 @@
 // Fork of @lolipopshock/pi-clm; see docs/icl.md for provenance and task contract.
 import { existsSync as fsExistsSync } from "node:fs";
 import { copyFile, cp, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { type Episode, episodeFromDict, episodeToDict, isValidEpisode } from "./episode.ts";
 import { diffSe, type Score, gate, pareto, pick, score } from "./gate.ts";
 import { buildNote } from "./note.ts";
@@ -107,7 +107,11 @@ export class Evolution {
 		runDir: string,
 		options: EvolutionOptions,
 	) {
-		this.dir = runDir;
+		// Absolute: trial session dirs are handed to pi verbatim, and pi resolves
+		// them against each episode's working directory, so a relative run dir
+		// strands the session files inside the episode work dir. The CLI already
+		// resolves --out; this covers library callers.
+		this.dir = resolve(runDir);
 		this.train = options.train;
 		this.dev = options.dev ?? options.train;
 		this.devSplit = options.dev ? "dev" : "train";
