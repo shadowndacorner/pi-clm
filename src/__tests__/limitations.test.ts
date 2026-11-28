@@ -172,6 +172,9 @@ describe("§11 limitation fixes", () => {
 		const editAssistant = writeToolAssistant("t1", 3);
 		const editResult = toolResultMsg("t1", 4);
 		await emit(harness, "turn_end", { type: "turn_end", message: editAssistant, toolResults: [editResult] });
+		// Commit the accepted draft at the next verified context boundary; the edit turn
+		// is part of the raw input at that boundary.
+		await emit(harness, "context", { type: "context", messages: [...raw, editAssistant, editResult] });
 
 		const persisted = await stateEntry(harness);
 		assert.equal(persisted.data.lastOutcome.kind, "applied");

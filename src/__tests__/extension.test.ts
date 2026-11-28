@@ -181,6 +181,8 @@ describe("live-context extension lifecycle", () => {
 		await writeFile(mirrorPath, compactSecondTurn(mirror), "utf8");
 
 		await emit(harness, "turn_end", { type: "turn_end", message: {}, toolResults: [] });
+		// The accepted draft activates only at the next verified context boundary.
+		await emit(harness, "context", { type: "context", messages: raw });
 		const persisted = harness.branch.filter((entry) => entry.customType === LIVE_CONTEXT_STATE).at(-1);
 		assert.equal(persisted.data.lastOutcome.kind, "applied");
 		assert.equal(persisted.data.revision, 1);
@@ -554,8 +556,9 @@ describe("live-context extension lifecycle", () => {
 		await emit(harness, "context", { type: "context", messages: rawConversation() });
 		await writeFile(mirrorPath, compactSecondTurn(await readFile(mirrorPath, "utf8")), "utf8");
 		await emit(harness, "turn_end", { type: "turn_end", message: {}, toolResults: [] });
+		await emit(harness, "context", { type: "context", messages: rawConversation() });
 		assert.doesNotMatch(harness.statuses.get("live-context") ?? "", /obs/);
-
+		
 		harness.setUsage(31);
 		await emit(harness, "turn_end", { type: "turn_end", message: {}, toolResults: [] });
 		assert.match(harness.statuses.get("live-context") ?? "", /obs 31\.0k tok/);
@@ -610,6 +613,7 @@ describe("live-context extension lifecycle", () => {
 		const mirrorPath = String(prompt[0].systemPrompt).match(/mirrored at `([^`]+)`/)![1];
 		await writeFile(mirrorPath, compactSecondTurn(await readFile(mirrorPath, "utf8")), "utf8");
 		await emit(harness, "turn_end", { type: "turn_end", message: {}, toolResults: [] });
+		await emit(harness, "context", { type: "context", messages: raw });
 		const checkpointEntry = harness.branch.at(-1);
 
 		// A branch whose selected head predates the checkpoint uses raw Pi context.
@@ -642,6 +646,7 @@ describe("live-context extension lifecycle", () => {
 		const mirrorPath = String(prompt[0].systemPrompt).match(/mirrored at `([^`]+)`/)![1];
 		await writeFile(mirrorPath, compactSecondTurn(await readFile(mirrorPath, "utf8")), "utf8");
 		await emit(harness, "turn_end", { type: "turn_end", message: {}, toolResults: [] });
+		await emit(harness, "context", { type: "context", messages: raw });
 		assert.ok(harness.branch.filter((entry) => entry.customType === LIVE_CONTEXT_STATE).at(-1).data.checkpoint);
 
 		await emit(harness, "session_compact", { type: "session_compact", reason: "threshold" });
@@ -935,6 +940,7 @@ describe("pi-clm entry point", () => {
 			}
 			await writeFile(path, original.replace("Solve the task", "expanded task ".repeat(100)));
 			await emit(harness, "turn_end", {});
+			await emit(harness, "context", { messages: raw });
 			assert.equal(harness.branch.at(-1)?.data.lastOutcome.kind, "applied");
 			const projected = await emit(harness, "context", { messages: raw });
 			assert.equal(projected[0].messages[0].content, "expanded task ".repeat(100).trim());
@@ -1583,29 +1589,58 @@ describe("pi-clm entry point", () => {
 			assert.match(details, /Size trailer +off/);
 		} finally { await emit(harness, "session_shutdown", {}); }
 	});
-	test("CLM: lifts Pi's raw-history max_tokens clamp using the effective estimate", async () => {
+	test("CLM: loaded extension leaves legacy output limits untouched", async () => {
 		const harness = createHarness();
 		liveContextExtension(harness.pi, { editingMode: "clm", budget: { contextBudget: 30_000 } });
 		harness.ctx.model = { contextWindow: 32_768, maxTokens: 4096 };
 		harness.ctx.getSystemPrompt = () => "";
 		await emit(harness, "session_start", { reason: "startup" });
 		try {
-			// No reading yet → leave the payload alone.
-			assert.equal((await emit(harness, "before_provider_request", { payload: { max_tokens: 1 } }))[0], undefined);
+			// Reachable legacy-trigger conditions: a fresh reading and a low existing limit.
 			await emit(harness, "context", { messages: [{ role: "user", content: "small effective context", timestamp: 1 }] });
-			// Pi clamped to 1 based on a large raw transcript; effective is tiny → lift to model max.
-			const lifted = await emit(harness, "before_provider_request", { payload: { model: "m", max_tokens: 1 } });
-			assert.deepEqual(lifted[0], { model: "m", max_tokens: 4096 });
-			const responses = await emit(harness, "before_provider_request", { payload: { max_output_tokens: 1 } });
-			assert.deepEqual(responses[0], { max_output_tokens: 4096 });
-			// Already generous → untouched.
-			assert.equal((await emit(harness, "before_provider_request", { payload: { max_tokens: 4096 } }))[0], undefined);
-			// Non-numeric or absent fields → untouched.
+			const cases = [
+				{ model: "m", max_tokens: 1 },
+				{ max_completion_tokens: 1 },
+				{ max_output_tokens: 1 },
+				{ model: "m", max_tokens: 1, max_completion_tokens: 1 },
+				{ messages: [{ role: "user", content: [{ type: "image_url", image_url: { url: "data:image/png;base64,abc" } }] }] },
+			];
+			for (const payload of cases) {
+				assert.equal((await emit(harness, "before_provider_request", { payload }))[0], undefined);
+			}
+			// Absent limits stay absent; generous limits stay untouched.
+			assert.equal((await emit(harness, "before_provider_request", { payload: { model: "m", max_tokens: 4096 } }))[0], undefined);
 			assert.equal((await emit(harness, "before_provider_request", { payload: { temperature: 0 } }))[0], undefined);
-			assert.match(await clmSettingsText(harness), /max_tokens clamp lifted on 2 requests/);
-			// Disabled → untouched.
-			await harness.commands.get("clm").handler("off", harness.ctx);
-			assert.equal((await emit(harness, "before_provider_request", { payload: { max_tokens: 1 } }))[0], undefined);
+			assert.doesNotMatch(await clmSettingsText(harness), /max_tokens clamp lifted/);
 		} finally { await emit(harness, "session_shutdown", {}); }
+	});
+	test("CLM queues an accepted draft and exposes the commit tool", async () => {
+		const harness = createHarness();
+		liveContextExtension(harness.pi, { editingMode: "clm" });
+		await emit(harness, "session_start", { reason: "startup" });
+		const raw = rawConversation();
+		await emit(harness, "context", { type: "context", messages: raw });
+		const before = await emit(harness, "before_agent_start", {
+			type: "before_agent_start",
+			systemPrompt: "base",
+			prompt: "task",
+			systemPromptOptions: {},
+		});
+		const mirrorPath = String(before[0].systemPrompt).match(/mirrored at `([^`]+)`/)![1];
+		await writeFile(mirrorPath, compactSecondTurn(await readFile(mirrorPath, "utf8")), "utf8");
+		await emit(harness, "turn_end", { type: "turn_end", message: {}, toolResults: [] });
+		assert.equal(harness.branch.filter((entry) => entry.customType === LIVE_CONTEXT_STATE).length, 0, "the draft must not be durable yet");
+		const commit = harness.tools.get("live_context_commit");
+		assert.ok(commit);
+		const queued = await commit.execute("commit-1", {}, undefined, undefined, harness.ctx);
+		assert.match(String(queued.content[0].text), /queued/);
+		await emit(harness, "context", { type: "context", messages: raw });
+		const persisted = harness.branch.filter((entry) => entry.customType === LIVE_CONTEXT_STATE).at(-1);
+		assert.equal(persisted.data.lastOutcome.kind, "applied");
+		assert.equal(persisted.data.revision, 1);
+		assert.match(persisted.data.lastOutcome.message, /Committed revision 1.*context shape/);
+		const noDraft = await commit.execute("commit-2", {}, undefined, undefined, harness.ctx);
+		assert.match(String(noDraft.content[0].text), /No accepted draft/);
+		await emit(harness, "session_shutdown", {});
 	});
 });

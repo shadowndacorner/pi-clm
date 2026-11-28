@@ -227,6 +227,8 @@ async function acceptCompactionEdit(harness: Harness): Promise<string> {
 	assert.notEqual(edited, mirror);
 	await writeFile(mirrorPath, edited, "utf8");
 	await emit(harness, "turn_end", { type: "turn_end", message: {}, toolResults: [] });
+	// Activate the draft at the next verified context boundary.
+	await emit(harness, "context", { type: "context", messages: harness.assembledMessages() });
 	return mirrorPath;
 }
 
