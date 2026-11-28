@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
+import { writeFileSync, appendFileSync } from "node:fs";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -30,6 +31,10 @@ type Harness = {
 	/** `pi.sendUserMessage` calls. */
 	sentUserMessages: Array<{ content: unknown; options?: unknown }>;
 	ctx: any;
+	/** Synthetic Pi ledger for provenance checks. */
+	ledgerMessages: LiveContextMessage[];
+	autoLedger: boolean;
+	setLedger(messages: LiveContextMessage[]): void;
 	setUsage(percent: number | undefined): void;
 };
 
@@ -54,6 +59,10 @@ function createHarness(initialBranch: any[] = []): Harness {
 	const notifications: string[] = [];
 	const statuses = new Map<string, string | undefined>();
 	const sentUserMessages: Array<{ content: unknown; options?: unknown }> = [];
+	const sessionFile = join(tmpdir(), `pi-clm-test-${process.pid}-${Math.random().toString(36).slice(2)}.jsonl`);
+	writeFileSync(sessionFile, "");
+	let ledgerMessages: LiveContextMessage[] = [];
+	let autoLedger = true;
 
 	const pi = {
 		on(name: string, handler: Handler) {
@@ -66,14 +75,16 @@ function createHarness(initialBranch: any[] = []): Harness {
 			tools.set(tool.name, tool);
 		},
 		appendEntry(customType: string, data: unknown) {
-			branch.push({
+			const entry = {
 				type: "custom",
 				id: `custom-${branch.length + 1}`,
 				parentId: branch.at(-1)?.id ?? null,
 				timestamp: new Date().toISOString(),
 				customType,
 				data,
-			});
+			};
+			branch.push(entry);
+			appendFileSync(sessionFile, `${JSON.stringify(entry)}\n`);
 		},
 		sendUserMessage(content: unknown, options?: unknown) {
 			sentUserMessages.push({ content, options });
@@ -94,11 +105,12 @@ function createHarness(initialBranch: any[] = []): Harness {
 		},
 		sessionManager: {
 			getSessionId: () => "extension-test-session",
-			getSessionFile: () => "/tmp/extension-test-session.jsonl",
+			getSessionFile: () => sessionFile,
+			isPersisted: () => true,
 			getBranch: () => [...branch],
 			getEntries: () => [...branch],
 			getEntry: (id: string) => branch.find((entry) => entry.id === id),
-			buildContextEntries: () => [],
+			buildContextEntries: () => ledgerMessages.map((message, index) => ({ id: `ledger-${index + 1}`, type: "message", message })),
 			getTree: () => [],
 			getLeafId: () => null,
 		},
@@ -120,6 +132,11 @@ function createHarness(initialBranch: any[] = []): Harness {
 		statuses,
 		sentUserMessages,
 		ctx,
+		ledgerMessages,
+		autoLedger,
+		setLedger(messages: LiveContextMessage[]) {
+			ledgerMessages = messages;
+		},
 		setUsage(percent: number | undefined) {
 			usagePercent = percent;
 		},
@@ -127,6 +144,7 @@ function createHarness(initialBranch: any[] = []): Harness {
 }
 
 async function emit(harness: Harness, name: string, event: any): Promise<any[]> {
+	if (name === "context" && harness.autoLedger) harness.setLedger(event.messages);
 	const results: any[] = [];
 	for (const handler of harness.handlers.get(name) ?? []) {
 		results.push(await handler(event, harness.ctx));
@@ -275,10 +293,13 @@ describe("live-context extension lifecycle", () => {
 
 		const changedRaw = rawConversation();
 		changedRaw[1] = { ...changedRaw[1], content: "externally changed raw history" };
+		// The verified ledger still holds the original transcript; the event messages are
+		// an unverified rewrite and must not be used.
+		harness.autoLedger = false;
 		const result = await emit(harness, "context", { type: "context", messages: changedRaw });
 		const visible = result[0].messages as LiveContextMessage[];
-		assert.equal(visible[0], changedRaw[0]);
-		assert.equal(visible[1], changedRaw[1]);
+		assert.equal(visible[0], raw[0]);
+		assert.equal(visible[1], raw[1]);
 		assert.equal(visible.at(-1)?.customType, "live-context-notice");
 		const latest = harness.branch.filter((entry) => entry.customType === LIVE_CONTEXT_STATE).at(-1);
 		assert.equal(latest.data.checkpoint, undefined);
@@ -507,7 +528,7 @@ describe("live-context extension lifecycle", () => {
 		await emit(harness, "session_shutdown", { type: "session_shutdown", reason: "quit" });
 	});
 
-	test("consecutive invalidations raise one composition warning", async () => {
+	test("consecutive branch reanchors stay valid without a composition warning", async () => {
 		const harness = createHarness();
 		liveContextExtension(harness.pi);
 		await emit(harness, "session_start", { type: "session_start", reason: "startup" });
@@ -538,7 +559,7 @@ describe("live-context extension lifecycle", () => {
 		await acceptEdit(variantConversation("b"));
 		assert.equal(warnings().length, 0);
 		await acceptEdit(variantConversation("c"));
-		assert.equal(warnings().length, 1);
+		assert.equal(warnings().length, 0, "entry identity replays the projection instead of invalidating it");
 		await emit(harness, "session_shutdown", { type: "session_shutdown", reason: "quit" });
 	});
 
@@ -1656,6 +1677,28 @@ describe("pi-clm entry point", () => {
 		assert.ok(notices.some((text: string) => /Committed revision 2/.test(text)), `expected revision 2: ${notices.join(" | ")}`);
 		void draftContext;
 		await emit(harness, "session_shutdown", {});
+	});
+	test("CLM: a failed draft publication does not activate the projection", async (t) => {
+		const harness = createHarness();
+		liveContextExtension(harness.pi, { editingMode: "clm" });
+		await emit(harness, "session_start", { reason: "startup" });
+		try {
+			const raw = rawConversation();
+			await emit(harness, "context", { type: "context", messages: raw });
+			const before = await emit(harness, "before_agent_start", { systemPrompt: "base" });
+			const path = String(before[0].systemPrompt).match(/mirrored at `([^`]+)`/)![1];
+			await writeFile(path, compactSecondTurn(await readFile(path, "utf8")), "utf8");
+			await emit(harness, "turn_end", { type: "turn_end", message: {}, toolResults: [] });
+			const queued = await harness.tools.get("live_context_commit").execute("commit-1", {}, undefined, undefined, harness.ctx);
+			assert.match(String(queued.content[0].text), /queued/);
+			const mocked = t.mock.method(MirrorStore.prototype, "write", async () => {
+				throw new Error("publication failed");
+			});
+			const projected = await emit(harness, "context", { type: "context", messages: raw });
+			assert.doesNotMatch(JSON.stringify(projected[0].messages), /Investigation complete/);
+			assert.ok(harness.notifications.some((notice) => /publication failed|Mirror refresh failed/.test(notice)));
+			mocked.mock.restore();
+		} finally { await emit(harness, "session_shutdown", {}); }
 	});
 	test("CLM queues an accepted draft and exposes the commit tool", async () => {
 		const harness = createHarness();

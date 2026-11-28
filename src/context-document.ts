@@ -169,6 +169,8 @@ function escapeRegExp(value: string): string {
 export interface RenderContextDocumentOptions {
 	revision?: number;
 	protectedIndexes?: Set<number>;
+	/** CLM-owned capped/withheld bodies: header stays editable=false, but the body is locked. */
+	lockedIndexes?: Set<number>;
 	/**
 	 * When set, the document nonce is derived from this seed and the revision instead of
 	 * the rendered baseline, so it stays constant between accepted edits even as new
@@ -184,6 +186,7 @@ export function renderContextDocument(
 ): ContextDocumentSnapshot {
 	const revision = options.revision ?? 0;
 	const protectedIndexes = options.protectedIndexes ?? selectProtectedMessageIndexes(messages);
+	const lockedIndexes = options.lockedIndexes ?? new Set<number>();
 	const baselineDigest = digestMessages(messages);
 	const stable = options.documentSeed !== undefined;
 	const currentDocumentId = documentId(stable ? `seed:${options.documentSeed}` : baselineDigest, revision);
@@ -194,11 +197,13 @@ export function renderContextDocument(
 			typeof authoredRole === "string" && /^[A-Za-z][A-Za-z0-9_-]*$/.test(authoredRole)
 			? authoredRole : source.role;
 		const protectedBlock = protectedIndexes.has(index);
+		const lockedBody = lockedIndexes.has(index);
 		return {
 			index,
 			id,
 			role,
 			protected: protectedBlock,
+			lockedBody,
 			header: `[[CTX_TURN document=${currentDocumentId} index=${index + 1} role=${role} id=${id} protected=${protectedBlock}]]`,
 			body: stable ? escapeStructuralLines(renderMessage(source)) : renderMessage(source),
 			source,
@@ -490,6 +495,27 @@ function repairToolGroupsWithProvenance(messages: LiveContextMessage[], provenan
 		}
 	}
 
+	// Exactly-once identity: a logical tool call may appear in only one physical result
+	// occurrence. Later non-contiguous duplicates become static tombstones, never bodies.
+	const seenToolCallIds = new Set<string>();
+	for (let index = 0; index < repaired.length; index++) {
+		const message = repaired[index];
+		if (message.role !== "toolResult" || typeof message.toolCallId !== "string") continue;
+		if (seenToolCallIds.has(message.toolCallId)) {
+			const tombstone: LiveContextMessage = {
+				role: "custom",
+				customType: "clm:terminal-duplicate-result",
+				content: [{ type: "text", text: "[pi-clm] Terminalized duplicate physical tool result; one logical call has one provider-visible result." }],
+				display: false,
+				timestamp: typeof message.timestamp === "number" ? message.timestamp : Date.now(),
+				details: { toolCallId: message.toolCallId, toolName: message.toolName, tombstone: true },
+			};
+			repaired[index] = tombstone;
+			continue;
+		}
+		seenToolCallIds.add(message.toolCallId);
+	}
+
 	return { messages: repaired, provenance: originOf };
 }
 
@@ -766,6 +792,30 @@ export function applyContextDocument(
 			}
 			continue;
 		}
+		if (sourceBlock.lockedBody) {
+			// Capped/withheld representations are CLM-owned. The model may remove the block,
+			// but editing its body would re-cap already-truncated text or hide provenance.
+			if (!parsedBlock || !parsedBlock.body) {
+				removedSourceIndexes.add(sourceBlock.index);
+				continue;
+			}
+			if (
+				parsedBlock.body !== sourceBlock.body ||
+				parsedBlock.role !== sourceBlock.role ||
+				parsedBlock.protected !== sourceBlock.protected
+			) {
+				return rejected(
+					snapshot,
+					beforeEstimate,
+					`Block ${sourceBlock.index + 1} is a CLM-owned capped/withheld representation and cannot be edited; remove the block or keep it unchanged.`,
+					[],
+				);
+			}
+			candidate.push(sourceBlock.source);
+			candidateOrigins.push({ sourceIndex: sourceBlock.index, kind: "kept" });
+			continue;
+		}
+
 		if (sourceBlock.protected) {
 			const restored =
 				!parsedBlock ||

@@ -64,12 +64,17 @@ export class MirrorStore {
 
 	async write(content: string, generation = this.generation + 1): Promise<void> {
 		if (this.disposed) throw new Error("Mirror store has been disposed.");
-		if (generation < this.generation) throw new Error("Stale mirror generation: a newer snapshot already exists.");
+		const previousGeneration = this.generation;
+		if (generation <= previousGeneration) throw new Error("Stale mirror generation: a newer snapshot already exists.");
 		const temporaryPath = join(this.directory, `.${basename(this.filePath)}.${randomUUID()}.tmp`);
 		try {
 			await writeFile(temporaryPath, content, { encoding: "utf8", mode: 0o600, flag: "wx" });
 			await rename(temporaryPath, this.filePath);
 			await chmod(this.filePath, 0o600);
+			// A concurrent publication that advanced the generation invalidates this write.
+			if (this.generation !== previousGeneration) {
+				throw new Error("Mirror generation changed during publication; this snapshot was not activated.");
+			}
 			this.generation = generation;
 		} catch (error) {
 			await rm(temporaryPath, { force: true }).catch(() => undefined);

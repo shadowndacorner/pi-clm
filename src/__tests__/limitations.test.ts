@@ -34,6 +34,7 @@ function createHarness(): Harness {
 	const branch: any[] = [];
 	const notifications: string[] = [];
 	const statuses = new Map<string, string | undefined>();
+	let ledgerMessages: LiveContextMessage[] = [];
 
 	const pi = {
 		on(name: string, handler: Handler) {
@@ -77,7 +78,7 @@ function createHarness(): Harness {
 			getEntries: () => [...branch],
 			getEntry: (id: string) => branch.find((entry) => entry.id === id),
 			buildContextEntries() {
-				return branch.filter((entry) => entry.type === "message").map((entry) => entry);
+				return ledgerMessages.map((message, index) => ({ id: `ledger-${index + 1}`, type: "message", message }));
 			},
 			getTree: () => [],
 			getLeafId: () => null,
@@ -91,6 +92,10 @@ function createHarness(): Harness {
 }
 
 async function emit(harness: Harness, name: string, event: any): Promise<any[]> {
+	if (name === "context") {
+		(harness.ctx.sessionManager as any).buildContextEntries = () =>
+			event.messages.map((message: LiveContextMessage, index: number) => ({ id: `ledger-${index + 1}`, type: "message", message }));
+	}
 	const results: any[] = [];
 	for (const handler of harness.handlers.get(name) ?? []) {
 		results.push(await handler(event, harness.ctx));

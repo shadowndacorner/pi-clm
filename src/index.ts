@@ -8,7 +8,6 @@ import { StringEnum } from "@earendil-works/pi-ai";
 import {
 	buildContextEntries,
 	buildSessionContext,
-	getLatestCompactionEntry,
 	calculateContextTokens,
 	estimateTokens,
 	sessionEntryToContextMessages,
@@ -734,7 +733,13 @@ function verifyCustomEntry(ctx: ExtensionContext, expected: unknown): void {
 		throw new Error("Session append did not produce the expected live-context entry in memory.");
 	}
 	const manager = ctx.sessionManager as { isPersisted?: () => boolean; getSessionFile?: () => string };
-	if (manager.isPersisted?.() && manager.getSessionFile?.()) {
+	// Real Pi 0.85 exposes isPersisted/getSessionFile; when it reports a durable session,
+	// the append must be acknowledged on disk. Hosts without those methods are not
+	// assumed durable and are verified in memory only.
+	if (manager.isPersisted?.() === true) {
+		if (!manager.getSessionFile?.()) {
+			throw new Error("Session append has no verified durable file acknowledgment.");
+		}
 		try {
 			const lines = readFileSync(manager.getSessionFile(), "utf8").trim().split("\n").filter(Boolean);
 			const lastLine = lines.at(-1);
@@ -763,11 +768,41 @@ function verifyCustomEntry(ctx: ExtensionContext, expected: unknown): void {
 		state = nextState;
 	}
 
+	/** CLM rejections are volatile; only off/reset/native compaction are durable transitions. */
+	function recordRejection(message: string, beforeTokens: number, afterTokens: number, at: string): void {
+		const lastOutcome = {
+			kind: "rejected" as const,
+			message,
+			beforeEstimate: beforeTokens,
+			afterEstimate: afterTokens,
+			estimateUnit: "tokens" as const,
+			at,
+		};
+		if (editingMode === "clm") {
+			state = { ...state, event: undefined, lastOutcome };
+		} else {
+			persistOutcome({ ...state, event: undefined, lastOutcome });
+		}
+		queueOutcomeNotice(`Edit rejected: ${message}`);
+	}
+
+	/** Capped/withheld representations are CLM-owned; the mirror must not let the model re-edit them. */
+	function lockedRepresentationIndexes(messages: LiveContextMessage[]): Set<number> {
+		const locked = new Set<number>();
+		for (let index = 0; index < messages.length; index++) {
+			const details = messages[index]!.details as Record<string, unknown> | undefined;
+			if (details?.piClmObservationCap === true || details?.piClmOverflowWithheld === true) locked.add(index);
+		}
+		return locked;
+	}
+
 	/**
 	 * Activate a queued draft once, only at a verified context boundary. CLM active
-	 * state is memory-only: the durable checkpoint is not rewritten by this operation.
+	 * state is memory-only: the durable checkpoint is not rewritten. The draft is
+	 * published to the mirror before runtime activation, so a failed publication
+	 * cannot leave a live projection that the visible mirror does not contain.
 	 */
-	function commitPendingDraft(ctx: ExtensionContext, rawMessages: LiveContextMessage[]): void {
+	async function commitPendingDraft(ctx: ExtensionContext, rawMessages: LiveContextMessage[]): Promise<void> {
 		if (!pendingDraft || !pendingDraft.queued || quarantined !== undefined) return;
 		const draft = pendingDraft;
 		const leaseMismatch =
@@ -787,21 +822,53 @@ function verifyCustomEntry(ctx: ExtensionContext, expected: unknown): void {
 			queueOutcomeNotice(`Queued draft was discarded: ${projected.reason}`);
 			return;
 		}
-		// Explicit CLM commit must fit the guard limit after accounting for the raw suffix.
+		if (!store) {
+			pendingDraft = undefined;
+			queueOutcomeNotice("Queued draft was discarded because the mirror store is unavailable.");
+			return;
+		}
+		// Explicit CLM commit must fit the guard limit after the same cap/withhold/continuity
+		// pipeline that will build the next request, not just after repair.
 		const resolved = resolveBudget(budgetPolicy, ctx.model?.contextWindow);
-		if (resolved && overflowGuard.mode === "withhold") {
-			const limit = overflowGuardLimit(resolved.budget, resolved.reserve, ctx.model?.contextWindow);
-			const effective = repairToolGroups(selectContextVisibleMessages(projected.messages));
-			const estimated = calibrator.apply(
-				estimateTextTokens(ctx.getSystemPrompt?.() ?? "") +
-				estimateLiveContextTokens(effective) +
-				estimateTextTokens(pendingNotice ?? ""),
-			);
-			if (limit > 0 && estimated > limit) {
+		const limit = resolved ? overflowGuardLimit(resolved.budget, resolved.reserve, ctx.model?.contextWindow) : undefined;
+		let mirrorMessages = capObservations(
+			repairToolGroups(selectContextVisibleMessages(projected.messages)),
+			observationCap,
+		);
+		if (limit !== undefined && limit > 0) {
+			const fixedTokens = calibrator.apply(estimateTextTokens(ctx.getSystemPrompt?.() ?? "") + estimateTextTokens(pendingNotice ?? ""));
+			if (overflowGuard.mode === "withhold") {
+				const visibleSuffix = selectContextVisibleMessages(projected.suffix);
+				const guarded = applyOverflowGuard(mirrorMessages, {
+					limit,
+					fixedTokens,
+					estimate: (messages) => calibrator.apply(estimateLiveContextTokens(messages)),
+					saveDirectory: join(store.directory, "withheld"),
+					protectBefore: Math.max(0, mirrorMessages.length - visibleSuffix.length),
+				});
+				mirrorMessages = guarded.messages;
+			}
+			const managedContinuity = continuityMessage(ctx, mirrorMessages);
+			const finalMessages = managedContinuity ? [...mirrorMessages, managedContinuity] : mirrorMessages;
+			const estimated = fixedTokens + calibrator.apply(estimateLiveContextTokens(finalMessages));
+			if (estimated > limit) {
 				pendingDraft = undefined;
 				queueOutcomeNotice(`Queued draft does not fit the guard limit (${estimated} > ${limit}); trim the mirror and commit again.`);
-                return;
+				return;
 			}
+		}
+		const snapshot = renderContextDocument(mirrorMessages, {
+			revision: draft.generation,
+			protectedIndexes: new Set<number>(),
+			lockedIndexes: lockedRepresentationIndexes(mirrorMessages),
+			documentSeed: `${ctx.sessionManager.getSessionId()}:${draft.checkpoint.sourceDigest}`,
+		});
+		try {
+			await store.write(snapshot.text);
+		} catch (error) {
+			pendingDraft = undefined;
+			queueOutcomeNotice(`Queued draft publication failed: ${error instanceof Error ? error.message : String(error)}`);
+			return;
 		}
 		pendingDraft = undefined;
 		runtimeActive = {
@@ -840,13 +907,20 @@ function verifyCustomEntry(ctx: ExtensionContext, expected: unknown): void {
 		stickyNoticeRepeats = 0;
 		const branch = ctx.sessionManager.getBranch() as ContinuitySessionEntryLike[];
 		state = reconstructLiveContextState(branch);
-		const entries = ctx.sessionManager.getEntries() as Array<{ id?: string; type?: string }>;
-		const latestCompaction = getLatestCompactionEntry(entries as never);
-		if (latestCompaction && state.checkpoint) {
-			const activeEntries = buildContextEntries(entries as never, ctx.sessionManager.getLeafId());
-			const activeIds = new Set(activeEntries.map((entry) => (entry as { id?: string }).id));
+		const activeBranch = ctx.sessionManager.getBranch() as Array<{ id?: string; type?: string }>;
+		let latestCompactionIndex = -1;
+		for (let index = 0; index < activeBranch.length; index++) {
+			if (activeBranch[index]?.type === "compaction") latestCompactionIndex = index;
+		}
+		if (latestCompactionIndex >= 0 && state.checkpoint) {
+			const branchIndexById = new Map(activeBranch.map((entry, index) => [entry.id, index]));
 			const covered = state.checkpoint.sourceEntries;
-			if (!covered || covered.some((entry) => !activeIds.has(entry.id))) {
+			// Physical ancestry, not mere ID membership: a checkpoint whose covered entries
+			// sit before the newest compaction on the active branch is predated by it.
+			if (!covered || covered.some((entry) => {
+				const index = branchIndexById.get(entry.id);
+				return index === undefined || index < latestCompactionIndex;
+			})) {
 				state = resetProjectionState(state, "Projection predates the newest native compaction.");
 			}
 		}
@@ -935,11 +1009,16 @@ function verifyCustomEntry(ctx: ExtensionContext, expected: unknown): void {
 	 * handler rewrote the messages, provenance is unknown; fail closed with a sanitized
 	 * projection instead of sending unverified raw event messages.
 	 */
-	function rawLedgerMatches(ctx: ExtensionContext, rawMessages: LiveContextMessage[]): boolean {
+	function ledgerMessages(ctx: ExtensionContext): LiveContextMessage[] | undefined {
 		const entries = branchEntries(ctx);
-		if (!entries) return true;
-		const ledgerMessages = entries.flatMap((entry) => entry.messages);
-		return digestMessages(ledgerMessages) === digestMessages(rawMessages);
+		if (!entries || entries.length === 0) return undefined;
+		return entries.flatMap((entry) => entry.messages);
+	}
+
+	function rawLedgerMatches(ctx: ExtensionContext, rawMessages: LiveContextMessage[]): boolean {
+		const ledger = ledgerMessages(ctx);
+		if (ledger === undefined) return false;
+		return digestMessages(ledger) === digestMessages(rawMessages);
 	}
 
 	/** Entry refs for the raw prefix a new checkpoint anchors to. */
@@ -1000,20 +1079,34 @@ function verifyCustomEntry(ctx: ExtensionContext, expected: unknown): void {
 			estimateUnit: "tokens",
 			createdAt: at,
 		});
-		persist({
-			version: 1,
-			enabled: state.enabled,
-			revision,
-			checkpoint,
-			lastOutcome: {
-				kind: "applied",
-				message,
-				beforeEstimate: beforeTokens,
-				afterEstimate: afterTokens,
-				estimateUnit: "tokens",
-				at,
-			},
-		});
+		if (editingMode === "clm") {
+			// CLM recovery is volatile: do not create a new durable checkpoint here.
+			runtimeActive = {
+				revision,
+				checkpoint,
+				activatedAt: at,
+				sessionId: ctx.sessionManager.getSessionId(),
+				lifecycleEpoch,
+				leafId: ctx.sessionManager.getLeafId() ?? null,
+				policyEpoch,
+				settingsDigest: policyDigest(),
+			};
+		} else {
+			persist({
+				version: 1,
+				enabled: state.enabled,
+				revision,
+				checkpoint,
+				lastOutcome: {
+					kind: "applied",
+					message,
+					beforeEstimate: beforeTokens,
+					afterEstimate: afterTokens,
+					estimateUnit: "tokens",
+					at,
+				},
+			});
+		}
 		awaitObservationForRevision = revision;
 		queueOutcomeNotice(message);
 	}
@@ -1676,10 +1769,36 @@ function verifyCustomEntry(ctx: ExtensionContext, expected: unknown): void {
 			turnBaseline = undefined;
 			lastBudgetReading = undefined;
 			currentContextView = undefined;
-			const message = "Raw event messages do not match the verified session ledger; provenance is unknown, so tool results were withheld and the staged commit was discarded.";
+			const message = "Raw event messages do not match the verified session ledger; provenance is unknown, so unverified origins were withheld and the staged commit was discarded.";
+			const reset = resetProjectionState(state, message);
+			persist(reset);
 			queueOutcomeNotice(message);
 			ctx.ui.notify(`pi-clm: ${message}`, "error");
-			const safe = rawMessages.filter((m) => m.role !== "toolResult");
+			// Use only the verified ledger. No role-based filter is safe: an upstream rewrite
+			// can promote a tool result into user/assistant/custom content.
+			const ledger = ledgerMessages(ctx);
+			const safe = ledger ? selectContextVisibleMessages(ledger) : [];
+			safe.push({
+				role: "custom",
+				customType: NOTICE_TYPE,
+				content: message,
+				display: false,
+				timestamp: Date.now(),
+			});
+			return { messages: asAgentMessages(safe) };
+		}
+
+		if (quarantined !== undefined) {
+			pendingDraft = undefined;
+			runtimeActive = undefined;
+			turnBaseline = undefined;
+			lastBudgetReading = undefined;
+			currentContextView = undefined;
+			const message = `Durable CLM state is quarantined; the unverified runtime projection is not used. ${quarantined}`;
+			queueOutcomeNotice(message);
+			ctx.ui.notify(`pi-clm: ${message}`, "error");
+			const ledger = ledgerMessages(ctx);
+			const safe = ledger ? selectContextVisibleMessages(ledger) : [];
 			safe.push({
 				role: "custom",
 				customType: NOTICE_TYPE,
@@ -1691,7 +1810,7 @@ function verifyCustomEntry(ctx: ExtensionContext, expected: unknown): void {
 		}
 
 		// Activate any accepted draft at this verified context boundary before rendering.
-		commitPendingDraft(ctx, rawMessages);
+		await commitPendingDraft(ctx, rawMessages);
 
 		let effectiveMessages = rawMessages;
 		let suffixMessages: LiveContextMessage[] = [];
@@ -1875,6 +1994,7 @@ function verifyCustomEntry(ctx: ExtensionContext, expected: unknown): void {
 			effectiveTokens: managedContinuity
 				? estimateLiveContextTokens(modelEffectiveMessages)
 				: projectionTokens,
+			rawDigest: digestMessages(rawMessages),
 			capturedAt: new Date().toISOString(),
 		};
 		updateStatus(ctx);
@@ -1892,6 +2012,7 @@ function verifyCustomEntry(ctx: ExtensionContext, expected: unknown): void {
 			...(editingMode === "clm"
 				? {
 					protectedIndexes: new Set<number>(),
+					lockedIndexes: lockedRepresentationIndexes(mirrorMessages),
 					// Nonce stays constant until the next accepted edit: header ids read on
 					// one call remain valid on the next.
 					documentSeed: `${ctx.sessionManager.getSessionId()}:${pendingDraft?.checkpoint.sourceDigest ?? activeCheckpoint()?.sourceDigest ?? "raw"}`,
@@ -1965,13 +2086,13 @@ function verifyCustomEntry(ctx: ExtensionContext, expected: unknown): void {
 		if (!resolved || overflowGuard.mode === "off") return undefined;
 		const limit = overflowGuardLimit(resolved.budget, resolved.reserve, ctx.model?.contextWindow);
 		if (limit <= 0) return undefined;
-		// v1 narrow truth table: cancel only when a fresh, verified post-guard
-		// effective context already fits the guard limit. Stale or unmeasurable
-		// readings allow native compaction instead of making an unsafe promise.
-		const effective = currentContextView
-			? calibrator.apply(estimateTextTokens(ctx.getSystemPrompt?.() ?? "") + currentContextView.effectiveTokens)
-			: undefined;
-		if (effective === undefined || effective > limit) return undefined;
+		// v1 narrow truth table: cancel only when the post-guard reading is fresh for
+		// the compacting transcript and provably fits. Stale or unmeasurable readings
+		// allow native compaction instead of making an unsafe promise.
+		const ledger = ledgerMessages(ctx);
+		if (!currentContextView || !ledger || digestMessages(ledger) !== currentContextView.rawDigest) return undefined;
+		const effective = calibrator.apply(estimateTextTokens(ctx.getSystemPrompt?.() ?? "") + currentContextView.effectiveTokens);
+		if (effective > limit) return undefined;
 		ctx.ui.notify(
 			`pi-clm: cancelled Pi's threshold compaction (raw-history based); the effective context is ~${effective.toLocaleString("en-US")} tokens and the overflow guard enforces ${limit.toLocaleString("en-US")}.`,
 			"info",
@@ -2074,19 +2195,7 @@ function verifyCustomEntry(ctx: ExtensionContext, expected: unknown): void {
 		const afterTokens = result.afterEstimate;
 		if (!result.accepted) {
 			const rejectionMessage = result.reason ?? "Context edit rejected.";
-			persistOutcome({
-				...state,
-				event: undefined,
-				lastOutcome: {
-					kind: "rejected",
-					message: rejectionMessage,
-					beforeEstimate: beforeTokens,
-					afterEstimate: afterTokens,
-					estimateUnit: "tokens",
-					at,
-				},
-			});
-			queueOutcomeNotice(`Edit rejected: ${rejectionMessage}`);
+			recordRejection(rejectionMessage, beforeTokens, afterTokens, at);
 			updateStatus(ctx);
 			return;
 		}
@@ -2128,19 +2237,7 @@ function verifyCustomEntry(ctx: ExtensionContext, expected: unknown): void {
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
 			const rejectionMessage = `Projection is not serializable: ${message}`;
-			persistOutcome({
-				...state,
-				event: undefined,
-				lastOutcome: {
-					kind: "rejected",
-					message: rejectionMessage,
-					beforeEstimate: beforeTokens,
-					afterEstimate: afterTokens,
-					estimateUnit: "tokens",
-					at,
-				},
-			});
-			queueOutcomeNotice(`Edit rejected: ${rejectionMessage}`);
+			recordRejection(rejectionMessage, beforeTokens, afterTokens, at);
 			updateStatus(ctx);
 			return;
 		}
@@ -2194,6 +2291,7 @@ function verifyCustomEntry(ctx: ExtensionContext, expected: unknown): void {
 				effectiveTokens: managedContinuity
 					? estimateLiveContextTokens(modelEffectiveMessages)
 					: afterTokens,
+				rawDigest: digestMessages(baseline.rawMessages),
 				capturedAt: at,
 			};
 		}

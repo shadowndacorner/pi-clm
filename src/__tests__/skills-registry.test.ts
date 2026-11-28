@@ -128,6 +128,7 @@ describe("skills registry (daily-driver wiring)", () => {
 			const commands = new Map<string, any>();
 			const branch: any[] = [];
 			const notifications: string[] = [];
+			let ledgerMessages: any[] = [];
 			const pi = {
 				on(name: string, handler: Handler) {
 					handlers.set(name, [...(handlers.get(name) ?? []), handler]);
@@ -136,7 +137,9 @@ describe("skills registry (daily-driver wiring)", () => {
 					commands.set(name, command);
 				},
 				registerTool() {},
-				appendEntry() {},
+				appendEntry(customType: string, data: unknown) {
+					branch.push({ type: "custom", id: `custom-${branch.length + 1}`, parentId: branch.at(-1)?.id ?? null, timestamp: new Date().toISOString(), customType, data });
+				},
 				sendUserMessage() {},
 			} as unknown as import("@earendil-works/pi-coding-agent").ExtensionAPI;
 			const ctx = {
@@ -155,7 +158,7 @@ describe("skills registry (daily-driver wiring)", () => {
 					getBranch: () => [...branch],
 					getEntries: () => [...branch],
 					getEntry: (id: string) => branch.find((entry) => entry.id === id),
-					buildContextEntries: () => [],
+					buildContextEntries: () => ledgerMessages.map((message, index) => ({ id: `ledger-${index + 1}`, type: "message", message })),
 					getTree: () => [],
 					getLeafId: () => null,
 				},
@@ -165,6 +168,7 @@ describe("skills registry (daily-driver wiring)", () => {
 			};
 			clmExtension(pi);
 			const emit = async (name: string, event: any): Promise<void> => {
+				if (name === "context") ledgerMessages = event.messages;
 				for (const handler of handlers.get(name) ?? []) await handler(event, ctx);
 			};
 			await emit("session_start", { type: "session_start", reason: "startup" });

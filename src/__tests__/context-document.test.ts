@@ -377,3 +377,65 @@ describe("opaque content preservation", () => {
 		assert.equal(result.messages[2], messages[2]);
 	});
 });
+
+describe("CLM-owned representations", () => {
+	test("capped/withheld bodies can be removed but not edited", () => {
+		const messages: LiveContextMessage[] = [
+			{ role: "user", content: "Keep the finding", timestamp: 1 },
+			{
+				role: "toolResult",
+				toolCallId: "c1",
+				toolName: "read",
+				content: [{ type: "text", text: "capped body" }],
+				isError: false,
+				timestamp: 2,
+				details: { piClmObservationCap: true },
+			},
+		];
+		const snapshot = renderContextDocument(messages, {
+			revision: 2,
+			lockedIndexes: new Set([1]),
+		});
+		const edit = applyContextDocument(replaceBody(snapshot, 1, "rewritten cap"), snapshot, {
+			editingMode: "clm",
+			requireShrink: false,
+		});
+		assert.equal(edit.accepted, false);
+		assert.match(edit.reason ?? "", /cannot be edited/);
+
+		const remove = applyContextDocument(deleteBlock(snapshot, 1), snapshot, {
+			editingMode: "clm",
+			requireShrink: false,
+		});
+		assert.equal(remove.accepted, true);
+		assert.equal(remove.messages.some((message) => message.role === "toolResult"), false);
+	});
+
+	test("a duplicate physical tool result becomes a static tombstone", () => {
+		const messages: LiveContextMessage[] = [
+			{ role: "user", content: "Inspect", timestamp: 1 },
+			{
+				role: "assistant",
+				content: [{ type: "text", text: "Calling read." }, toolCall("c1", "cat file")],
+				api: "test",
+				provider: "test",
+				model: "test",
+				usage: { cost: { total: 0 } },
+				stopReason: "toolUse",
+				timestamp: 2,
+			},
+			{ role: "toolResult", toolCallId: "c1", toolName: "bash", content: [{ type: "text", text: "first body" }], isError: false, timestamp: 3 },
+			{ role: "user", content: "Continue", timestamp: 4 },
+			{ role: "toolResult", toolCallId: "c1", toolName: "bash", content: [{ type: "text", text: "second body" }], isError: false, timestamp: 5 },
+		];
+		const snapshot = renderContextDocument(messages, { revision: 3 });
+		const result = applyContextDocument(replaceBody(snapshot, 0, "Inspect now"), snapshot, { requireShrink: false });
+		assert.equal(result.accepted, true);
+		const first = result.messages.find((message) => message.role === "toolResult");
+		assert.ok(first);
+		assert.match(JSON.stringify(first.content), /first body/);
+		const tombstone = result.messages.find((message) => message.customType === "clm:terminal-duplicate-result" || message.customType === "clm:terminal-orphan-result");
+		assert.ok(tombstone, "the later physical occurrence is terminalized");
+		assert.doesNotMatch(JSON.stringify(tombstone.content), /second body/);
+	});
+});

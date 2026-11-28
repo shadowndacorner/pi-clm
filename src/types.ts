@@ -10,6 +10,8 @@ export interface DocumentBlock {
 	id: string;
 	role: string;
 	protected: boolean;
+	/** Body is a CLM-owned capped/withheld representation: keep or remove, never edit. */
+	lockedBody?: boolean;
 	header: string;
 	body: string;
 	source: LiveContextMessage;

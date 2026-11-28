@@ -70,6 +70,8 @@ export function truncationMarker(shown: number, total: number): string {
 /** Cap one tool result. Returns the same object when nothing changes. */
 export function capToolResult(message: LiveContextMessage, policy: ObservationCapPolicy): LiveContextMessage {
 	if (policy.maxCharacters === undefined || message.role !== "toolResult") return message;
+	const details = message.details as Record<string, unknown> | undefined;
+	if (details?.piClmObservationCap === true) return message;
 	const content = message.content;
 	const parts: unknown[] = Array.isArray(content) ? content : typeof content === "string" ? [{ type: "text", text: content }] : [];
 	const total = parts.reduce<number>((sum, part) => sum + (isTextPart(part) ? part.text.length : 0), 0);
@@ -90,6 +92,7 @@ export function capToolResult(message: LiveContextMessage, policy: ObservationCa
 	return {
 		...message,
 		content: [{ type: "text", text: capped }, ...nonText],
+		details: { ...(details ?? {}), piClmObservationCap: true, capCharacters: policy.maxCharacters },
 	};
 }
 

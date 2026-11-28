@@ -149,6 +149,7 @@ export function applyOverflowGuard(messages: LiveContextMessage[], options: Appl
 			note = {
 				...source,
 				content: [{ type: "text", text: withheldNoteText(record, estimated, options.limit) }],
+				details: { ...(source.details as Record<string, unknown> | undefined), piClmOverflowWithheld: true },
 			};
 			withheldCache.set(source, note);
 			withheldCache.set(note, note);

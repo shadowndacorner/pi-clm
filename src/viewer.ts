@@ -101,6 +101,8 @@ export interface CurrentContextView {
 	suffixMessageCount: number;
 	rawTokens: number;
 	effectiveTokens: number;
+	/** Digest of the raw messages this reading was taken from. */
+	rawDigest?: string;
 	capturedAt: string;
 }
 
