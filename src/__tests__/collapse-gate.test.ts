@@ -143,12 +143,33 @@ describe("headerless collapse gate (CLM mode)", () => {
 		const malformedSecond = `${first}\n[[CLM  REWRITE revision=0 document=${current.documentId} reason=second]]\n${summary}`;
 		const malformedResult = applyContextDocument(malformedSecond, current, clm);
 		assert.equal(malformedResult.accepted, false);
-		assert.match(malformedResult.reason ?? "", /additional|malformed/i);
+		assert.match(malformedResult.reason ?? "", /exactly one|additional|malformed|found/i);
 
 		const concatenated = `${first}[[CLM REWRITE revision=0 document=${current.documentId} reason=second]]\n${summary}`;
 		const concatenatedResult = applyContextDocument(concatenated, current, clm);
 		assert.equal(concatenatedResult.accepted, false);
-		assert.match(concatenatedResult.reason ?? "", /complete line|multiple|embedded/i);
+		assert.match(concatenatedResult.reason ?? "", /exactly one|complete line|multiple|embedded|found/i);
+	});
+
+	test("rewrite-marker inventory cannot be bypassed by guidance-prefix or split-line declarations", () => {
+		const current = renderContextDocument(conversation(), { revision: 0, protectedIndexes: new Set(), documentSeed: "s" });
+		const summary = "# Context Summary\n- rewrite body";
+		const first = `[[CLM REWRITE revision=0 document=${current.documentId} reason=localized trims cannot free enough room]]`;
+
+		const guidanceCanonical = `${first}\n# Edit bodies or delete editable CTX_TURN blocks.[[CLM REWRITE revision=0 document=${current.documentId} reason=second]]\n${summary}`;
+		const guidanceCanonicalResult = applyContextDocument(guidanceCanonical, current, clm);
+		assert.equal(guidanceCanonicalResult.accepted, false);
+		assert.match(guidanceCanonicalResult.reason ?? "", /exactly one|additional|found/i);
+
+		const guidanceWhitespace = `${first}\n# Edit bodies or delete editable CTX_TURN blocks.[[CLM  REWRITE revision=0 document=${current.documentId} reason=second]]\n${summary}`;
+		const guidanceWhitespaceResult = applyContextDocument(guidanceWhitespace, current, clm);
+		assert.equal(guidanceWhitespaceResult.accepted, false);
+		assert.match(guidanceWhitespaceResult.reason ?? "", /exactly one|additional|found/i);
+
+		const splitLine = `${first}\n# Edit bodies or delete editable CTX_TURN blocks.[[CLM\nREWRITE revision=0 document=${current.documentId} reason=second]]\n${summary}`;
+		const splitLineResult = applyContextDocument(splitLine, current, clm);
+		assert.equal(splitLineResult.accepted, false);
+		assert.match(splitLineResult.reason ?? "", /exactly one|additional|found/i);
 	});
 
 	test("removing an owner turn's block is rejected; editing its body is allowed", () => {

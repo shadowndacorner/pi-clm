@@ -17,6 +17,8 @@ const DOCUMENT_VERSION = 1;
 const META_RE =
 	/^\[\[LIVE_CONTEXT version=(\d+) revision=(\d+) document=([a-f0-9]{64}) baseline=([a-f0-9]{64})\]\](?:\r?\n|$)/;
 
+const EDIT_GUIDANCE_LINE = "# Edit bodies or delete editable CTX_TURN blocks. Keep metadata/header lines intact.";
+
 interface ParsedBlock {
 	index: number;
 	id: string;
@@ -212,7 +214,7 @@ export function renderContextDocument(
 	const renderedBlocks = blocks.map((block) => `${block.header}\n${block.body}`);
 	const text = [
 		`[[LIVE_CONTEXT version=${DOCUMENT_VERSION} revision=${revision} document=${currentDocumentId} baseline=${baselineDigest}]]`,
-		"# Edit bodies or delete editable CTX_TURN blocks. Keep metadata/header lines intact.",
+		EDIT_GUIDANCE_LINE,
 		...renderedBlocks,
 	].join("\n\n");
 
@@ -239,7 +241,7 @@ const FOREIGN_HEADER_RE =
 const REWRITE_DECL_RE =
 	/^\[\[CLM REWRITE revision=(\d+) document=([0-9a-f]{64}) reason=(.+?)\]\]$/;
 
-/** Recognizes declaration-shaped markers, including whitespace variants, in body lines. */
+/** Recognizes declaration-shaped markers, including whitespace and split-line variants. */
 const REWRITE_MARKER_RE = /\[\[\s*CLM\s+REWRITE\b/gi;
 
 interface RewriteDeclaration {
@@ -248,33 +250,58 @@ interface RewriteDeclaration {
 	reason: string;
 }
 
+interface RewritePreamble {
+	metadataIndex?: number;
+	guidanceIndex?: number;
+	contentStart: number;
+}
+
 interface RewriteParseResult {
 	declaration?: RewriteDeclaration;
 	error?: string;
+	declarationLineIndex?: number;
+	preamble?: RewritePreamble;
 }
 
-function rewriteMarkerCount(line: string): number {
-	return line.match(REWRITE_MARKER_RE)?.length ?? 0;
+function rewriteMarkerCount(text: string): number {
+	return text.match(REWRITE_MARKER_RE)?.length ?? 0;
+}
+
+/** Strip only the exact metadata line and exact guidance line in their allowed preamble positions. */
+function rewritePreamble(lines: string[]): RewritePreamble {
+	let index = 0;
+	while (index < lines.length && lines[index].trim() === "") index++;
+	let metadataIndex: number | undefined;
+	if (index < lines.length && META_RE.test(`${lines[index].trim()}\n`)) {
+		metadataIndex = index;
+		index++;
+	}
+	while (index < lines.length && lines[index].trim() === "") index++;
+	let guidanceIndex: number | undefined;
+	if (metadataIndex !== undefined && index < lines.length && lines[index].trim() === EDIT_GUIDANCE_LINE) {
+		guidanceIndex = index;
+		index++;
+	}
+	while (index < lines.length && lines[index].trim() === "") index++;
+	return { metadataIndex, guidanceIndex, contentStart: index };
 }
 
 function parseRewriteDeclaration(text: string, snapshot: ContextDocumentSnapshot): RewriteParseResult {
-	const contentLines = text
-		.split(/\r?\n/)
-		.map((line) => line.trim())
-		.filter((line) => line.length > 0 && !META_RE.test(`${line}\n`) && !line.startsWith("# Edit bodies or delete editable CTX_TURN blocks."));
-	const firstLine = contentLines[0];
+	const rawLines = text.split(/\r?\n/);
+	const totalMarkers = rewriteMarkerCount(text);
+	if (totalMarkers === 0) return { error: "no CLM REWRITE declaration" };
+	if (totalMarkers !== 1) {
+		return { error: `expected exactly one CLM REWRITE declaration, found ${totalMarkers}` };
+	}
+	const preamble = rewritePreamble(rawLines);
+	const firstLine = rawLines[preamble.contentStart]?.trim();
 	if (!firstLine) return { error: "no CLM REWRITE declaration" };
 	const firstLineMarkers = rewriteMarkerCount(firstLine);
 	if (firstLineMarkers === 0) {
-		return { error: "the first content line must be a CLM REWRITE declaration" };
+		return { error: "the first content line must be a complete CLM REWRITE declaration" };
 	}
 	if (firstLineMarkers !== 1) {
 		return { error: "the CLM REWRITE declaration must be one complete line, not multiple declarations" };
-	}
-	// Exactly one leading declaration; any later declaration-shaped line is rejected, not
-	// silently folded into the notes body. This includes malformed whitespace variants.
-	if (contentLines.slice(1).some((line) => rewriteMarkerCount(line) > 0)) {
-		return { error: "additional or malformed CLM REWRITE declaration(s) after the first content line" };
 	}
 	const match = REWRITE_DECL_RE.exec(firstLine);
 	if (!match) return { error: "malformed CLM REWRITE declaration" };
@@ -287,7 +314,7 @@ function parseRewriteDeclaration(text: string, snapshot: ContextDocumentSnapshot
 	if (declaration.revision !== snapshot.revision || declaration.documentId !== snapshot.documentId) {
 		return { error: `CLM REWRITE declaration does not match revision ${snapshot.revision} and document ${snapshot.documentId}` };
 	}
-	return { declaration };
+	return { declaration, declarationLineIndex: preamble.contentStart, preamble };
 }
 
 function parseDocument(text: string, snapshot: ContextDocumentSnapshot): ParsedDocument {
@@ -348,7 +375,7 @@ function parseDocument(text: string, snapshot: ContextDocumentSnapshot): ParsedD
 	const preamble = text
 		.slice(metadataEnd, firstBlockStart)
 		.split("\n")
-		.filter((line) => !line.trim().startsWith("# Edit bodies or delete editable CTX_TURN blocks."))
+		.filter((line) => line.trim() !== EDIT_GUIDANCE_LINE)
 		.join("\n")
 		.trim();
 
@@ -816,14 +843,16 @@ export function applyContextDocument(
 					"Without that declaration a headerless draft is not applied; tidy blocks in place and keep the [[CTX_TURN ...]] headers.",
 			);
 		}
+		const bodyLines = editedText.split(/\r?\n/);
+		const preamble = rewriteResult.preamble ?? rewritePreamble(bodyLines);
 		const body = unescapeStructuralLines(
-			editedText
-				.split(/\r?\n/)
-				.filter((line) =>
-					!META_RE.test(`${line}\n`) &&
-					!line.trim().startsWith("# Edit bodies or delete editable CTX_TURN blocks.") &&
-					!line.trim().startsWith("[[CLM REWRITE")
-				)
+			bodyLines
+				.filter((line, index) => {
+					if (preamble.metadataIndex !== undefined && index === preamble.metadataIndex) return false;
+					if (preamble.guidanceIndex !== undefined && index === preamble.guidanceIndex) return false;
+					if (rewriteResult.declarationLineIndex !== undefined && index === rewriteResult.declarationLineIndex) return false;
+					return true;
+				})
 				.join("\n")
 				.trim(),
 		);
