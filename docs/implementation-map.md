@@ -1,4 +1,4 @@
-# Implementation map: staged batched CLM commits (v7)
+# Implementation map: staged batched CLM commits (v9)
 
 Status: implementation-readiness artifact for issue #4 v14. This is a code-change map, not implementation approval. Target: `shadowndacorner/pi-clm` at `3e4e977`; Pi v0.85.0. Scope: CLM mode only; conservative mode unchanged.
 
@@ -320,7 +320,7 @@ Required named tests:
 - failed/buffered write -> later ordinary Pi append -> restart;
 - fixed-mask near-offset `Δ_net`, authored replacement/copy taint, capHead change, guard off/on, resurrection/double-cap;
 - all compaction truth-table cells, stale estimate + queued failed commit with no subsequent context;
-- final-payload max-token gate: loaded-extension integration test proving the legacy `lastBudgetReading` lift is removed/replaced and, with no certificate, `max_tokens`, `max_completion_tokens`, and `max_output_tokens` stay untouched; unsupported, image-bearing, and variant payloads deny without mutation; raw-vs-serialized optional cache fields; nested tool-schema keys named like token limits are not stripped; later context/provider mutation and stale reading deny; absent limits are not added; no positive lift in v1; future v2 certificate/digest gates remain non-executing until independently specified;
+- final-payload max-token gate: loaded-extension integration test proving the legacy `lastBudgetReading` lift is removed or replaced by a no-op handler and, with no certificate, `max_tokens`, `max_completion_tokens`, and `max_output_tokens` stay untouched; unsupported, image-bearing, and variant payloads deny without mutation; raw-vs-serialized optional cache fields; nested tool-schema keys named like token limits are not stripped; later context/provider mutation and stale reading deny; absent limits are not added; no positive lift in v1; future v2 certificate/digest gates remain non-executing until independently specified;
 - no-budget/90%-soft/hard/hysteresis/growth cases;
 - full headerless rewrite retaining all owner turns and owner-body-edit allowance;
 - external write at last pre-publication boundary and during rollback;
