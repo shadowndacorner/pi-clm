@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -7,6 +8,7 @@ import { StringEnum } from "@earendil-works/pi-ai";
 import {
 	buildContextEntries,
 	buildSessionContext,
+	getLatestCompactionEntry,
 	calculateContextTokens,
 	estimateTokens,
 	sessionEntryToContextMessages,
@@ -240,6 +242,7 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 	const editingMode = options.editingMode ?? "conservative";
 	const commandName = editingMode === "clm" ? "clm" : "live-context";
 	let state = initialLiveContextState();
+	let verificationContext: ExtensionContext | undefined;
 	let quarantined: string | undefined;
 	let store: MirrorStore | undefined;
 	let turnBaseline: TurnBaseline | undefined;
@@ -664,6 +667,7 @@ function policyDigest(): string {
 	}
 
 	function setEnabled(enabled: boolean, ctx: ExtensionContext): void {
+		verificationContext = ctx;
 		if (enabled === state.enabled) return;
 		if (enabled) {
 			persistOutcome({
@@ -719,15 +723,43 @@ function policyDigest(): string {
 		].sort((left, right) => left.revision - right.revision);
 	}
 
+function canonicalEntry(value: unknown): string {
+	return JSON.stringify(value);
+}
+
+function verifyCustomEntry(ctx: ExtensionContext, expected: unknown): void {
+	const branch = ctx.sessionManager.getBranch() as Array<{ customType?: string; data?: unknown }>;
+	const last = branch.at(-1);
+	if (!last || last.customType !== LIVE_CONTEXT_STATE || canonicalEntry(last.data) !== canonicalEntry(expected)) {
+		throw new Error("Session append did not produce the expected live-context entry in memory.");
+	}
+	const manager = ctx.sessionManager as { isPersisted?: () => boolean; getSessionFile?: () => string };
+	if (manager.isPersisted?.() && manager.getSessionFile?.()) {
+		try {
+			const lines = readFileSync(manager.getSessionFile(), "utf8").trim().split("\n").filter(Boolean);
+			const lastLine = lines.at(-1);
+			const parsed = lastLine ? JSON.parse(lastLine) : undefined;
+			if (!parsed || parsed.customType !== LIVE_CONTEXT_STATE || canonicalEntry(parsed.data) !== canonicalEntry(expected)) {
+				throw new Error("Session file did not acknowledge the appended live-context entry.");
+			}
+		} catch (error) {
+			throw new Error(`Persistence verification failed: ${error instanceof Error ? error.message : String(error)}`);
+		}
+	}
+}
+
 	function persist(nextState: typeof state): void {
 		pi.appendEntry(LIVE_CONTEXT_STATE, nextState);
+		if (verificationContext) verifyCustomEntry(verificationContext, nextState);
 		state = nextState;
 		rememberCheckpoint(state.checkpoint);
 	}
 
 	/** Persistence must succeed before activating even a slim state transition. */
 	function persistOutcome(nextState: typeof state): void {
-		pi.appendEntry(LIVE_CONTEXT_STATE, toOutcomeEntry(nextState));
+		const entry = toOutcomeEntry(nextState);
+		pi.appendEntry(LIVE_CONTEXT_STATE, entry);
+		if (verificationContext) verifyCustomEntry(verificationContext, entry);
 		state = nextState;
 	}
 
@@ -808,6 +840,16 @@ function policyDigest(): string {
 		stickyNoticeRepeats = 0;
 		const branch = ctx.sessionManager.getBranch() as ContinuitySessionEntryLike[];
 		state = reconstructLiveContextState(branch);
+		const entries = ctx.sessionManager.getEntries() as Array<{ id?: string; type?: string }>;
+		const latestCompaction = getLatestCompactionEntry(entries as never);
+		if (latestCompaction && state.checkpoint) {
+			const activeEntries = buildContextEntries(entries as never, ctx.sessionManager.getLeafId());
+			const activeIds = new Set(activeEntries.map((entry) => (entry as { id?: string }).id));
+			const covered = state.checkpoint.sourceEntries;
+			if (!covered || covered.some((entry) => !activeIds.has(entry.id))) {
+				state = resetProjectionState(state, "Projection predates the newest native compaction.");
+			}
+		}
 		checkpointHistory = reconstructLiveContextHistory(branch)
 			.flatMap((snapshot) => snapshot.checkpoint ? [snapshot.checkpoint] : [])
 			.filter((checkpoint, index, checkpoints) =>
@@ -1563,6 +1605,7 @@ function policyDigest(): string {
 	}
 
 	pi.on("session_start", async (event, ctx) => {
+		verificationContext = ctx;
 		subagentsAdapter ??= attachSubagentsAdapter(process.env, (message) => {
 			ctx?.ui?.notify?.(`[LIVE CONTEXT] ${message}`, "warning");
 		});
@@ -1599,6 +1642,7 @@ function policyDigest(): string {
 	});
 
 	pi.on("context", async (event, ctx) => {
+		verificationContext = ctx;
 		const rawMessages = asLiveMessages(event.messages);
 		if (!state.enabled) {
 			turnBaseline = undefined;
@@ -1994,6 +2038,7 @@ function policyDigest(): string {
 	});
 
 	pi.on("turn_end", async (event, ctx) => {
+		verificationContext = ctx;
 		if (!state.enabled || !store) return;
 		captureObservedUsage(ctx);
 		if (!turnBaseline) return;
@@ -2162,6 +2207,7 @@ function policyDigest(): string {
 	});
 
 	pi.on("session_compact", async (_event, ctx) => {
+		verificationContext = ctx;
 		try {
 			persist(resetProjectionState(state, "Projection reset after native Pi compaction."));
 		} catch (error) {
