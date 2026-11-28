@@ -17,7 +17,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
-import { applyContextDocument, digestMessages, renderContextDocument, repairToolGroups } from "./context-document.ts";
+import { applyContextDocument, digestMessages, renderContextDocument, repairToolGroups, repairToolGroupsWithProvenance } from "./context-document.ts";
 import {
 	CONTINUITY_SIZE_WARNING_TOKENS,
 	DEFAULT_RECALL_TOKENS,
@@ -888,10 +888,15 @@ function verifyCustomEntry(ctx: ExtensionContext, expected: unknown): void {
 		// pipeline that will build the next request, not just after repair.
 		const resolved = resolveBudget(budgetPolicy, ctx.model?.contextWindow);
 		const limit = resolved ? overflowGuardLimit(resolved.budget, resolved.reserve, ctx.model?.contextWindow) : undefined;
-		let mirrorMessages = capObservations(
-			repairToolGroups(selectContextVisibleMessages(projected.messages)),
-			observationCap,
+		const selectedProjection = selectContextVisibleMessages(projected.messages);
+		const visibleSuffix = selectContextVisibleMessages(projected.suffix);
+		const prefixEnd = Math.max(0, selectedProjection.length - visibleSuffix.length);
+		const repairedProjection = repairToolGroupsWithProvenance(
+			selectedProjection,
+			selectedProjection.map((_, index) => index),
 		);
+		const protectBefore = repairedProjection.provenance.filter((sourceIndex) => sourceIndex < prefixEnd).length;
+		let mirrorMessages = capObservations(repairedProjection.messages, observationCap);
 		if (limit !== undefined && limit > 0) {
 			const commitNotice = `Committed revision ${draft.generation} at the next context boundary.${draft.shape ? ` ${draft.shape}` : ""}`;
 			const fixedTokens =
@@ -903,13 +908,12 @@ function verifyCustomEntry(ctx: ExtensionContext, expected: unknown): void {
 				COMMIT_NOTICE_MARGIN_TOKENS +
 				noticeReserveFor(limit);
 			if (overflowGuard.mode === "withhold") {
-				const visibleSuffix = selectContextVisibleMessages(projected.suffix);
 				const guarded = applyOverflowGuard(mirrorMessages, {
 					limit,
 					fixedTokens,
 					estimate: (messages) => calibrator.apply(estimateLiveContextTokens(messages)),
 					saveDirectory: join(store.directory, "withheld"),
-					protectBefore: Math.max(0, mirrorMessages.length - visibleSuffix.length),
+					protectBefore,
 				});
 				mirrorMessages = guarded.messages;
 			}
@@ -960,16 +964,31 @@ function verifyCustomEntry(ctx: ExtensionContext, expected: unknown): void {
 	}
 
 	/** One queue-validation path for both the tool and `/clm commit`. */
-	async function queuePendingDraft(): Promise<{ ok: boolean; message: string; details: Record<string, unknown> }> {
+	async function queuePendingDraft(ctx: ExtensionContext): Promise<{ ok: boolean; message: string; details: Record<string, unknown> }> {
 		if (!state.enabled) return { ok: false, message: "CLM is off; there is no live context to commit.", details: { queued: false } };
-		if (!pendingDraft) return { ok: false, message: "No accepted draft is pending; edit the mirror first.", details: { queued: false } };
-		if (pendingDraft.baseRevision !== activeRevision()) {
-			pendingDraft = undefined;
-			return { ok: false, message: "The draft's base revision changed; edit and commit again.", details: { queued: false } };
+		const draft = pendingDraft;
+		if (!draft) return { ok: false, message: "No accepted draft is pending; edit the mirror first.", details: { queued: false } };
+		const activeStore = store;
+		if (!activeStore) return { ok: false, message: "The mirror store is unavailable; commit is refused.", details: { queued: false } };
+		if (!draftLeaseValid(ctx, draft, activeStore)) {
+			return { ok: false, message: "The draft's lease or base revision changed; edit and commit again.", details: { queued: false } };
 		}
-		if (!store) return { ok: false, message: "The mirror store is unavailable; commit is refused.", details: { queued: false } };
-		const expectedDigest = pendingDraft.renderedDigest ?? pendingDraft.acceptedMirrorDigest;
-		const current = await store.read();
+		const expectedDigest = draft.renderedDigest ?? draft.acceptedMirrorDigest;
+		let current: string | undefined;
+		try {
+			current = await activeStore.read();
+		} catch (error) {
+			return {
+				ok: false,
+				message: `The mirror could not be read: ${error instanceof Error ? error.message : String(error)}`,
+				details: { queued: false },
+			};
+		}
+		// The read awaits, so revalidate the exact draft, store, branch, lifecycle and policy
+		// before mutating queue state.
+		if (!draftLeaseValid(ctx, draft, activeStore) || pendingDraft !== draft) {
+			return { ok: false, message: "The draft or its lease changed while checking the mirror; commit is refused.", details: { queued: false } };
+		}
 		if (current === undefined || textDigest(current) !== expectedDigest) {
 			return {
 				ok: false,
@@ -977,11 +996,11 @@ function verifyCustomEntry(ctx: ExtensionContext, expected: unknown): void {
 				details: { queued: false },
 			};
 		}
-		if (pendingDraft.queued) {
-			return { ok: true, message: `Draft revision ${pendingDraft.generation} is already queued.`, details: { queued: true, generation: pendingDraft.generation, baseRevision: pendingDraft.baseRevision } };
+		if (draft.queued) {
+			return { ok: true, message: `Draft revision ${draft.generation} is already queued.`, details: { queued: true, generation: draft.generation, baseRevision: draft.baseRevision } };
 		}
-		pendingDraft.queued = true;
-		return { ok: true, message: `Draft revision ${pendingDraft.generation} is queued for the next verified context boundary.`, details: { queued: true, generation: pendingDraft.generation, baseRevision: pendingDraft.baseRevision } };
+		draft.queued = true;
+		return { ok: true, message: `Draft revision ${draft.generation} is queued for the next verified context boundary.`, details: { queued: true, generation: draft.generation, baseRevision: draft.baseRevision } };
 	}
 
 	/** Fail closed to the verified ledger after a stale tree/ledger or aborted lease. */
@@ -1475,7 +1494,7 @@ function verifyCustomEntry(ctx: ExtensionContext, expected: unknown): void {
 		],
 		parameters: CommitParameters,
 		async execute(_toolCallId, _params, _signal, _onUpdate, _ctx) {
-			const queued = await queuePendingDraft();
+			const queued = await queuePendingDraft(_ctx);
 			return {
 				content: [{ type: "text", text: queued.message }],
 				details: queued.details,
@@ -1789,7 +1808,7 @@ function verifyCustomEntry(ctx: ExtensionContext, expected: unknown): void {
 			case "commit":
 				if (editingMode !== "clm") { ctx.ui.notify("Commit is CLM mode only.", "warning"); return; }
 				{
-					const queued = await queuePendingDraft();
+					const queued = await queuePendingDraft(ctx);
 					ctx.ui.notify(queued.message, queued.ok ? "info" : "warning");
 				}
 				return;
@@ -1913,6 +1932,20 @@ function verifyCustomEntry(ctx: ExtensionContext, expected: unknown): void {
 				`The verified session ledger changed during draft ${commitResult === "committed" ? "publication" : "commit"}; the pre-await context was discarded.`,
 			);
 		}
+		const renderStore = store;
+		const renderEpoch = lifecycleEpoch;
+		const renderSessionId = ctx.sessionManager.getSessionId();
+		let renderLeafId = ctx.sessionManager.getLeafId() ?? null;
+		const renderPolicyEpoch = policyEpoch;
+		const renderSettingsDigest = policyDigest();
+		const renderLeaseValid = (): boolean => renderStore === store &&
+			state.enabled &&
+			lifecycleEpoch === renderEpoch &&
+			ctx.sessionManager.getSessionId() === renderSessionId &&
+			(ctx.sessionManager.getLeafId() ?? null) === renderLeafId &&
+			policyEpoch === renderPolicyEpoch &&
+			policyDigest() === renderSettingsDigest &&
+			rawLedgerMatches(ctx, rawMessages);
 
 		let effectiveMessages = rawMessages;
 		let suffixMessages: LiveContextMessage[] = [];
@@ -2058,9 +2091,24 @@ function verifyCustomEntry(ctx: ExtensionContext, expected: unknown): void {
 			}
 			queueOutcomeNotice(notice);
 		}
+		// Re-anchoring (conservative mode) and projection reset append CLM's own durable
+		// state entry, which legitimately changes Pi's current leaf. Recapture the lease
+		// after those writes so the late mirror publication is not mistaken for an
+		// external tree move.
+		renderLeafId = ctx.sessionManager.getLeafId() ?? null;
+
 		const visibleRawMessages = selectContextVisibleMessages(rawMessages);
-		effectiveMessages = selectContextVisibleMessages(effectiveMessages);
-		effectiveMessages = repairToolGroups(effectiveMessages);
+		const suffixVisible = selectContextVisibleMessages(suffixMessages);
+		const selectedEffective = selectContextVisibleMessages(effectiveMessages);
+		const prefixEnd = Math.max(0, selectedEffective.length - suffixVisible.length);
+		const repairedEffective = repairToolGroupsWithProvenance(
+			selectedEffective,
+			selectedEffective.map((_, index) => index),
+		);
+		effectiveMessages = repairedEffective.messages;
+		const protectBefore = activeCheckpoint()
+			? repairedEffective.provenance.filter((sourceIndex) => sourceIndex < prefixEnd).length
+			: 0;
 		if (editingMode === "clm") effectiveMessages = capObservations(effectiveMessages, observationCap);
 		pendingOverflowNotice = undefined;
 		// Learn from the provider's count of the previous request before estimating this one.
@@ -2078,10 +2126,9 @@ function verifyCustomEntry(ctx: ExtensionContext, expected: unknown): void {
 					estimate: (messages) => calibrator.apply(estimateLiveContextTokens(messages)),
 					saveDirectory: store ? join(store.directory, "withheld") : undefined,
 					// Only the raw suffix after the accepted projection is withholdable; the
-					// model's own accepted context is respected.
-					protectBefore: activeCheckpoint()
-						? Math.max(0, effectiveMessages.length - selectContextVisibleMessages(suffixMessages).length)
-						: 0,
+					// model's own accepted context is respected. The boundary is tracked through
+					// group-repair provenance, not by subtracting an unrepaired suffix length.
+					protectBefore,
 				});
 				if (guarded.withheld.length > 0) {
 					effectiveMessages = guarded.messages;
@@ -2114,37 +2161,56 @@ function verifyCustomEntry(ctx: ExtensionContext, expected: unknown): void {
 
 		// Extension-managed continuity is appended after the editable projection so
 		// mirror compression cannot silently remove an active obligation or exact pin.
-		const mirrorMessages = pendingDraft && pendingDraft.baseRevision === activeRevision()
+		const draftForRender = pendingDraft;
+		const mirrorMessages = draftForRender && draftForRender.baseRevision === activeRevision()
 			? (() => {
-				const draftProjection = applyProjection(rawMessages, pendingDraft.checkpoint);
-				return draftProjection.valid ? draftProjection.messages : pendingDraft.checkpoint.projectedMessages;
+				const draftProjection = applyProjection(rawMessages, draftForRender.checkpoint);
+				return draftProjection.valid ? draftProjection.messages : draftForRender.checkpoint.projectedMessages;
 			})()
 			: effectiveMessages;
 		const snapshot = renderContextDocument(mirrorMessages, {
-			revision: pendingDraft?.generation ?? activeRevision(),
+			revision: draftForRender?.generation ?? activeRevision(),
 			...(editingMode === "clm"
 				? {
 					protectedIndexes: new Set<number>(),
 					lockedIndexes: lockedRepresentationIndexes(mirrorMessages),
 					// Nonce stays constant until the next accepted edit: header ids read on
 					// one call remain valid on the next.
-					documentSeed: `${ctx.sessionManager.getSessionId()}:${pendingDraft?.checkpoint.sourceDigest ?? activeCheckpoint()?.sourceDigest ?? "raw"}`,
+					documentSeed: `${ctx.sessionManager.getSessionId()}:${draftForRender?.checkpoint.sourceDigest ?? activeCheckpoint()?.sourceDigest ?? "raw"}`,
 				}
 				: {}),
 		});
 		try {
-			await store.write(snapshot.text);
-			if (pendingDraft) pendingDraft.renderedDigest = textDigest(snapshot.text);
+			// The late mirror refresh is itself an await boundary. Predicate publication on
+			// the captured store/session/lifecycle/policy/ledger, and revalidate after it.
+			await renderStore!.write(snapshot.text, undefined, renderLeaseValid);
+			if (draftForRender && pendingDraft === draftForRender) {
+				pendingDraft.renderedDigest = textDigest(snapshot.text);
+				// Rebase the draft's CAS token on this authorized successful refresh.
+				pendingDraft.storeGeneration = renderStore!.currentGeneration();
+			}
 			turnBaseline = {
 				rawMessages: [...rawMessages],
 				effectiveMessages: [...mirrorMessages],
 				snapshot,
 			};
 		} catch (error) {
+			if (!renderLeaseValid()) {
+				return await failClosedContext(
+					ctx,
+					"The session tree, ledger, store, lifecycle or policy changed during mirror refresh; the pre-await context was discarded.",
+				);
+			}
 			turnBaseline = undefined;
 			const message = error instanceof Error ? error.message : String(error);
 			queueOutcomeNotice(`Mirror refresh failed: ${message}`);
 			ctx.ui.notify(pendingNotice ?? message, "error");
+		}
+		if (!renderLeaseValid()) {
+			return await failClosedContext(
+				ctx,
+				"The session tree, ledger, store, lifecycle or policy changed during mirror refresh; the pre-await context was discarded.",
+			);
 		}
 
 		const output = [...modelEffectiveMessages];
@@ -2178,6 +2244,12 @@ function verifyCustomEntry(ctx: ExtensionContext, expected: unknown): void {
 			calibrator.record(
 				estimateTextTokens(ctx.getSystemPrompt?.() ?? "") + estimateLiveContextTokens(output),
 				rawMessages.length,
+			);
+		}
+		if (!renderLeaseValid()) {
+			return await failClosedContext(
+				ctx,
+				"The session tree, ledger, store, lifecycle or policy changed before the response was returned; the pre-await context was discarded.",
 			);
 		}
 		return { messages: asAgentMessages(output) };

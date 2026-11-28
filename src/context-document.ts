@@ -245,19 +245,36 @@ interface RewriteDeclaration {
 	reason: string;
 }
 
-function parseRewriteDeclaration(text: string, snapshot: ContextDocumentSnapshot): RewriteDeclaration | undefined {
-	const declarations: RewriteDeclaration[] = [];
-	for (const line of text.split(/\r?\n/)) {
-		const match = REWRITE_DECL_RE.exec(line.trim());
-		if (!match) continue;
-		const reason = match[3].trim();
-		if (!reason) continue;
-		declarations.push({ revision: Number(match[1]), documentId: match[2], reason });
+interface RewriteParseResult {
+	declaration?: RewriteDeclaration;
+	error?: string;
+}
+
+function parseRewriteDeclaration(text: string, snapshot: ContextDocumentSnapshot): RewriteParseResult {
+	const contentLines = text
+		.split(/\r?\n/)
+		.map((line) => line.trim())
+		.filter((line) => line.length > 0 && !META_RE.test(`${line}\n`) && !line.startsWith("# Edit bodies or delete editable CTX_TURN blocks."));
+	const declarationLines = contentLines.filter((line) => line.startsWith("[[CLM REWRITE"));
+	if (declarationLines.length !== 1) {
+		return {
+			error: declarationLines.length === 0
+				? "no CLM REWRITE declaration"
+				: `expected exactly one CLM REWRITE declaration, found ${declarationLines.length}`,
+		};
 	}
-	if (declarations.length !== 1) return undefined;
-	const declaration = declarations[0]!;
-	if (declaration.revision !== snapshot.revision || declaration.documentId !== snapshot.documentId) return undefined;
-	return declaration;
+	if (contentLines[0] !== declarationLines[0]) {
+		return { error: "the CLM REWRITE declaration must be the first content line" };
+	}
+	const match = REWRITE_DECL_RE.exec(declarationLines[0]);
+	if (!match) return { error: "malformed CLM REWRITE declaration" };
+	const reason = match[3].trim();
+	if (!reason) return { error: "CLM REWRITE declaration must state a reason" };
+	const declaration: RewriteDeclaration = { revision: Number(match[1]), documentId: match[2], reason };
+	if (declaration.revision !== snapshot.revision || declaration.documentId !== snapshot.documentId) {
+		return { error: `CLM REWRITE declaration does not match revision ${snapshot.revision} and document ${snapshot.documentId}` };
+	}
+	return { declaration };
 }
 
 function parseDocument(text: string, snapshot: ContextDocumentSnapshot): ParsedDocument {
@@ -351,13 +368,20 @@ function contentToolCalls(message: LiveContextMessage): Array<{ id?: string; nam
 }
 
 function toolCallIdCounts(message: LiveContextMessage): Map<string, number> {
-	const counts = new Map<string, number>();
-	const add = (id: string) => counts.set(id, (counts.get(id) ?? 0) + 1);
-	for (const call of contentToolCalls(message)) if (call.id) add(call.id);
+	const contentCounts = new Map<string, number>();
+	const legacyCounts = new Map<string, number>();
+	const add = (counts: Map<string, number>, id: string) => counts.set(id, (counts.get(id) ?? 0) + 1);
+	for (const call of contentToolCalls(message)) if (call.id) add(contentCounts, call.id);
 	for (const call of Array.isArray(message.tool_calls) ? message.tool_calls : []) {
 		if (call && typeof call === "object" && typeof (call as Record<string, unknown>).id === "string") {
-			add(String((call as Record<string, unknown>).id));
+			add(legacyCounts, String((call as Record<string, unknown>).id));
 		}
+	}
+	// A legacy tool_calls encoding of the same call is one logical call, not a second
+	// occurrence. Preserve duplicate ids within either representation.
+	const counts = new Map<string, number>();
+	for (const id of new Set([...contentCounts.keys(), ...legacyCounts.keys()])) {
+		counts.set(id, Math.max(contentCounts.get(id) ?? 0, legacyCounts.get(id) ?? 0));
 	}
 	return counts;
 }
@@ -418,7 +442,7 @@ export function repairToolGroups(messages: LiveContextMessage[]): LiveContextMes
 	return repairToolGroupsWithProvenance(messages, messages.map((_, index) => index)).messages;
 }
 
-function repairToolGroupsWithProvenance(messages: LiveContextMessage[], provenance: number[]): RepairedGroups {
+export function repairToolGroupsWithProvenance(messages: LiveContextMessage[], provenance: number[]): RepairedGroups {
 	const repaired = [...messages];
 	const originOf = [...provenance];
 	const dropAt = (index: number, count: number) => {
@@ -768,13 +792,14 @@ export function applyContextDocument(
 	// The rewrite becomes one notes block, but every owner (user) turn is kept: a rewrite
 	// may summarise everything the model has already seen, never the owner's instructions.
 	if (options.editingMode === "clm" && parsed.blocks.length === 0 && editedText.trim().length > 0) {
-		const rewrite = parseRewriteDeclaration(editedText, snapshot);
+		const rewriteResult = parseRewriteDeclaration(editedText, snapshot);
+		const rewrite = rewriteResult.declaration;
 		if (!rewrite) {
 			return rejected(
 				snapshot,
 				beforeEstimate,
-				"Headerless context is a whole-context rewrite, but it has no valid explicit opt-in. " +
-					`Start the file with one line: [[CLM REWRITE revision=${snapshot.revision} document=${snapshot.documentId} reason=<why localized trims cannot free enough room>]]. ` +
+				`Headerless context is a whole-context rewrite, but its declaration is invalid: ${rewriteResult.error ?? "no declaration"}. ` +
+					`Start the file with exactly one leading line: [[CLM REWRITE revision=${snapshot.revision} document=${snapshot.documentId} reason=<why localized trims cannot free enough room>]]. ` +
 					"Without that declaration a headerless draft is not applied; tidy blocks in place and keep the [[CTX_TURN ...]] headers.",
 			);
 		}
@@ -784,7 +809,7 @@ export function applyContextDocument(
 				.filter((line) =>
 					!META_RE.test(`${line}\n`) &&
 					!line.trim().startsWith("# Edit bodies or delete editable CTX_TURN blocks.") &&
-					!REWRITE_DECL_RE.test(line.trim())
+					!line.trim().startsWith("[[CLM REWRITE")
 				)
 				.join("\n")
 				.trim(),
