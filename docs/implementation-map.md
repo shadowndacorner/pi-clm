@@ -227,57 +227,26 @@ Queue/activation occurs at a verified `context` boundary.
 
 ## 11. Max-output-token lifting
 
-### v1 production policy: fail-closed, no lift without a host certificate
+### v1 production policy: no certified lift
 
-`before_provider_request` must not use `lastBudgetReading` alone. The gate is executable, but v1 production does **not** lift output limits unless a host-issued `terminalProviderHookCertificate` is present. The certificate is an external launcher invariant: it asserts CLM is the last registered `before_provider_request` handler in the Pi extension chain and that no later context/provider hook can mutate the payload. It is not inferred from Pi's public API. If absent, every payload denies and leaves its output-limit fields unchanged.
+`before_provider_request` must not use `lastBudgetReading`. v1 has **no positive output-limit lift path**. The legacy CLM hook that raises `max_tokens`, `max_completion_tokens`, or `max_output_tokens` from `lastBudgetReading` is removed. The provider hook only checks and denies: limits remain untouched, absent limits are not added, and no certificate enables lifting.
 
-The certificate must be validated by a fixture where a later provider hook mutates the payload; that fixture must deny. If the host cannot provide the certificate, lifting remains disabled. This is the explicit no-lift fallback required by the v7 review.
+Optional lifting is deferred to a future v2. It would require a trusted host pre-hook capture of an independently serialized payload plus a certificate bound to extension-registry order, model/route, session/request, generation, and lease, with invalidation on reload or registration changes. Pi's public `before_provider_request` chain does not expose that proof, so v1 does not implement it.
 
-### Reachable v1 payload subtype
+### Non-executing future gate note
 
-The only positive subtype is a serialized Pi v0.85 `openai-completions` payload produced by `buildParams`/`convertMessages`, with these exact fields:
+The prior reachable subtype, bound, and digest design are retained only as a v2 design note, not v1 acceptance. A future attempt must:
 
-- top-level allowed: `model` string; `messages` array; `stream` boolean; `stream_options` exact `{include_usage:true}` optional; `prompt_cache_key` string optional; `prompt_cache_retention` exact `"24h"` optional; `store` exact `false` optional; `temperature` finite number optional; `tools` array optional; `tool_choice` exact `{type:"auto"|"none"|"required"|"function", function?:{name:string}}` or string optional; `max_tokens` or `max_completion_tokens` finite positive integer optional; `reasoning_effort` string optional; `thinking` exact `{type:"enabled"|"disabled", clear_thinking?:boolean}` optional; `tool_stream` boolean optional; `priority` finite number optional.
-- `messages`: system/developer `{role,content:string}`; user `{role,content:string}` or `{role,content:[{type:"text",text:string}|{type:"image_url",image_url:{url:string}}]}`; assistant `{role,content:string|null, tool_calls?: [...]}`; tool `{role:"tool",content:string,tool_call_id:string,name?:string}`.
-- tool calls: `{id:string,type:"function",function:{name:string,arguments:string}}`; `reasoning_details`, `reasoning_content`, custom/grammar tool calls, and opaque blocks deny.
-- tools: `{type:"function",function:{name:string,description:string,parameters:JSON object,strict?:boolean}}`; custom/grammar tools deny.
-- Unknown keys, wrong types, nulls where not allowed, duplicate `max_tokens` and `max_completion_tokens`, arrays where not allowed, unserializable values, and non-JSON tool parameters deny.
+- use a pinned independent serializer or trusted host capture for `clmCandidateDigest`;
+- bind the allowlist to `ctx.model.api === "openai-completions"` and the actual route/serializer;
+- strip only root `max_tokens`/`max_completion_tokens`, not similarly named nested tool-schema keys;
+- deny image-bearing payloads or provide a model/route-specific image-token bound;
+- define certificate issuance/invalidation and a real later-hook negative topology;
+- use a finite positive integer desired replacement and safe model/window arithmetic.
 
-Anthropic, Responses, Google, Kimi deferred-tools, cache-control variants, and any other shape deny. This is a reachable subtype, not general provider support. A positive fixture must be a real serialized Pi v0.85 payload, not a synthetic `{name,description,parameters}` object.
+### v1 acceptance
 
-### Conservative bound
-
-Use `B(text) = UTF-8 byte length of the serialized text`, not `estimateTextTokens`. `U(payload) = B(canonicalJson(payload with output-limit fields removed)) + MESSAGE_OVERHEAD_PER_MESSAGE * messageCount`. A tokenizer cannot emit more tokens than bytes for valid UTF-8 serialized payloads, so `B` is a conservative upper bound; the independent oracle must validate the actual model/tokenizer framing, not merely sample text. If the oracle contradicts `U`, deny lift.
-
-Constants, each counted exactly once:
-
-- `FRAMING_RESERVE = 4096`;
-- `PROVIDER_OVERHEAD = 2048` (headroom only, not inside `U`);
-- `MESSAGE_OVERHEAD_PER_MESSAGE = 16` (per message, inside `U`);
-- `UNCERTAINTY = ceil(0.05 * U(payload))`;
-- `CONSERVATIVE_HEADROOM = FRAMING_RESERVE + PROVIDER_OVERHEAD + UNCERTAINTY`.
-
-`desired = min(modelMax, window - U(payload) - CONSERVATIVE_HEADROOM)`.
-
-### Final digest bridge and terminal certificate
-
-CLM's `context` handler sees `AgentMessage[]`, not the serialized provider request. v1 defines `clmProjection` as the canonical allowlisted payload CLM itself would emit from its final context transform. `clmCandidateDigest = sha256(canonicalJson(clmProjection with output-limit fields removed))`; `payloadDigest = sha256(canonicalJson(actual payload with output-limit fields removed))`. They must be equal. Hashing both after lifting would be self-attesting, so the digest is computed on the limit-stripped payload before lift.
-
-Pi invokes `before_provider_request` handlers sequentially, so a later handler can replace or grow the payload. CLM cannot observe a mutation that happens after its own hook. Therefore a `terminalProviderHookCertificate` is required for any lift. The certificate is a host/launcher assertion validated by a real later-hook denial fixture; it is not a self-attesting runtime predicate. If it is absent or cannot be validated, deny lift.
-
-### Lift predicates
-
-Lift is permitted only when all hold:
-
-1. `terminalProviderHookCertificate` is present and validated;
-2. payload shape is in the reachable v1 subtype and every token-bearing field is enumerated;
-3. the stored `clmCandidateDigest` matches the final `payloadDigest` on the limit-stripped domain;
-4. runtime/policy lease matches and no downstream context growth/replacement or unknown transform occurred;
-5. `desired > 0`, `desired <= modelMax`, and `U(payload) + desired <= window - CONSERVATIVE_HEADROOM`;
-6. exactly one existing numeric output-limit field is present: `max_tokens` or `max_completion_tokens`, finite positive integer, and only that one; conflicting simultaneous fields deny;
-7. `current < desired`; absent limits are not added.
-
-If any predicate fails, leave all output-limit fields unchanged. Tests: a real Pi v0.85 serialized payload positive subtype; no certificate denies; later context-chain mutation denies; later provider-hook mutation denies; high-token-density Unicode/JSON against an independent bound oracle; nested tool/schema expansion; boundary equality `U + desired == window - CONSERVATIVE_HEADROOM`; unsupported/opaque/provider variants deny; stale reading denies; conflicting output-limit fields deny; untouched limits on denial; one bounded permitted lift under a validated certificate with exact digest match; absent limits are not added.
+A loaded-extension integration test must prove the old `lastBudgetReading` lift is gone and that with no certificate `max_tokens`, `max_completion_tokens`, and `max_output_tokens` remain untouched on all payloads, including unsupported, image-bearing, and variant shapes. A standalone unit fixture for a new gate is insufficient.
 
 ## 12. Consumer wiring and compaction
 
@@ -351,7 +320,7 @@ Required named tests:
 - failed/buffered write -> later ordinary Pi append -> restart;
 - fixed-mask near-offset `Δ_net`, authored replacement/copy taint, capHead change, guard off/on, resurrection/double-cap;
 - all compaction truth-table cells, stale estimate + queued failed commit with no subsequent context;
-- final-payload max-token gate: one real serialized Pi v0.85 `openai-completions` payload matching the reachable subtype, including nested function tools and tool history; no `terminalProviderHookCertificate` denies; a real later context-chain mutation denies; a real later provider-hook mutation denies; high-token-density Unicode/JSON checked against an independent bound oracle; nested tool/schema expansion; boundary equality `U + desired == window - CONSERVATIVE_HEADROOM`; unsupported/opaque/provider variants deny; stale reading denies; conflicting max-token fields deny; untouched limits on denial; absent limits are not added; one bounded permitted lift under a validated certificate with exact limit-stripped candidate/final digest match;
+- final-payload max-token gate: loaded-extension integration test proving the legacy `lastBudgetReading` lift is removed/replaced and, with no certificate, `max_tokens`, `max_completion_tokens`, and `max_output_tokens` stay untouched; unsupported, image-bearing, and variant payloads deny without mutation; raw-vs-serialized optional cache fields; nested tool-schema keys named like token limits are not stripped; later context/provider mutation and stale reading deny; absent limits are not added; no positive lift in v1; future v2 certificate/digest gates remain non-executing until independently specified;
 - no-budget/90%-soft/hard/hysteresis/growth cases;
 - full headerless rewrite retaining all owner turns and owner-body-edit allowance;
 - external write at last pre-publication boundary and during rollback;
