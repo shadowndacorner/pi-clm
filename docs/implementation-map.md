@@ -45,6 +45,8 @@ Status: implementation-readiness artifact for issue #4 v14. This is a code-chang
 1. **Provider output**: `effectiveActive()` plus raw suffix since the runtime cutoff.
 2. **Mirror**: `pendingDraft` plus uncovered raw suffix.
 
+Second-edit oracle: an accepted second edit replaces only `pendingDraft` with a new generation/nonce; provider-active and durable state remain unchanged. A rejected second edit preserves the last valid draft, its coverage cursor, and its commit eligibility; the raw suffix is neither skipped nor duplicated.
+
 A covered entry/message advances the draft cursor only if it is represented, explicitly removed, or normalized with transitive lineage. An A-only mirror cannot consume unseen parallel B; B remains raw suffix and is appended only when represented.
 
 ## 2. Real Pi v0.85.0 adapters
@@ -148,7 +150,9 @@ APIs:
 - `publish(expectedVisibleDigest, generation)` reads the visible file, compares digest/nonce/generation, then atomically renames the staged file;
 - `restore(expectedVisibleDigest, generation)` restores only if its own generation and visible digest still match.
 
-Apply the same coordinator to ordinary context re-renders and queued commits. A read/check followed by rename cannot guarantee no-lost edits against an uncooperative writer racing after the final check. The documented promise is **best-effort detection with cooperative ownership**, or use an advisory lock if cooperative locking is required. Without cooperation, an external write after the final comparison may be overwritten; this must be stated, not hidden.
+Apply the same coordinator to ordinary context re-renders and queued commits. Publication is serialized through one in-process lane/queue in `MirrorStore`; awaits must not interleave independently. Each writer captures a baseline visible digest/nonce/generation, stages a private file, and publishes only if the expected visible identity still matches. Stale-generation writes are rejected. If an ordinary re-render races a queued commit or an accepted edit, the re-render must not overwrite the draft/queued commit or the accepted-edit generation; the queued commit or edit wins, and the re-render is retried or discarded.
+
+A read/check followed by rename cannot guarantee no-lost edits against an uncooperative writer racing after the final check. The documented promise is **best-effort detection with cooperative ownership**, or use an advisory lock if cooperative locking is required. Without cooperation, an external write after the final comparison may be overwritten; this must be stated, not hidden.
 
 ### Publication failure-state table
 
@@ -181,7 +185,7 @@ Rules:
 - full completed result content only in a provider-valid assistant-tool-call/tool-result pairing;
 - exactly-once replay of one physical occurrence;
 - conflicting independent results for one logical call fail closed;
-- late B2 gets one static tombstone; duplicate B1 deduplicated/rejected;
+- late B2 gets one static tombstone. Exactly-once identity: only replay of the same `(entryId, ordinal, digest)` is idempotent. Two distinct physical occurrences claiming one logical call fail closed even when their bodies are byte-identical; reject/quarantine/non-promote both and never expose either body as custom/user text. The same `toolCallId` on different assistant origins does not collide.
 - close the metadata-only foreign-header path that can enter the headerless full-rewrite branch;
 - reject edits to capped/withheld bodies.
 
@@ -223,14 +227,23 @@ Queue/activation occurs at a verified `context` boundary.
 
 ## 11. Max-output-token lifting
 
-`before_provider_request` must not use `lastBudgetReading` alone. It needs a final-payload gate:
+`before_provider_request` must not use `lastBudgetReading` alone. It needs an executable final-payload gate.
 
-- identify the exact provider payload shape;
-- compute a conservative upper bound from final system/messages/tools/schema plus uncertainty and reserve;
-- lift only for supported, bounded payload shapes;
-- if a downstream context handler grows/replaces messages or an unrecognized provider transform occurs, do not lift.
+Supported payload variants: provider request objects with a bounded `messages` array and enumerable token-bearing fields for system/instructions, text/tool/schema/response-format, and fixed framing. Opaque media, unknown transforms, or unrecognized payload shapes are not eligible.
 
-Test: activate a valid CLM candidate, grow/replace context in a later handler, leave the CLM estimate fresh, and assert `max_tokens`, `max_completion_tokens`, and `max_output_tokens` remain unchanged. Test matching bounded payload permits lift; unknown payload does not.
+Predicate:
+
+`U(payload) = tokens(system/instructions) + tokens(messages) + tokens(tools/schema/response-format) + fixed framing + PROVIDER_OVERHEAD + UNCERTAINTY`
+
+Lift is permitted only when all of these hold:
+
+1. the payload shape is recognized and every token-bearing field is enumerable;
+2. the final payload identity matches the stored CLM candidate digest, or the final payload token bound is independently computed and bounded;
+3. `U(payload) + desired <= window - CONSERVATIVE_HEADROOM`;
+4. the provider/model cap allows `desired`;
+5. no downstream context growth/replacement, opaque media, stale estimate, or unknown transform occurred.
+
+If any predicate fails, leave `max_tokens`, `max_completion_tokens`, and `max_output_tokens` unchanged. Tests: activate a valid CLM candidate, grow/replace context in a later handler, leave the CLM estimate fresh, and assert all three fields remain unchanged; test a matching bounded payload permits lift; test unknown/opaque payload denies lift.
 
 ## 12. Consumer wiring and compaction
 
@@ -286,12 +299,13 @@ Required named tests:
 - actual tree/branch and compaction behavior;
 - parallel A(c1,c2) -> B1 -> abort -> commit -> restart -> late B2 -> duplicate B1;
 - open A-only vs terminalized-coverable;
-- distinct B1 entry IDs with same call ID and different malicious payloads fail closed;
+- distinct B1 entry IDs with same call ID: different malicious payloads and byte-identical bodies both fail closed; only same `(entryId, ordinal, digest)` replay is idempotent;
 - two separate physical results with identical body and conflicting bodies;
 - same call ID on different assistant origins does not collide;
-- two edits plus interleaved suffix;
+- two edits plus interleaved suffix; accepted second edit replaces only the draft with new generation/nonce; rejected second edit preserves the last valid draft and coverage/commit eligibility without suffix skip/duplication;
 - draft not provider-active; same-batch edit+commit refusal;
 - queued with no next request; exactly one activation;
+- internal mirror publication interleaving: ordinary re-render vs queued commit vs accepted edit; stale-generation rejection and non-destructive behavior;
 - lease races against tree/settings/off/reset/shutdown;
 - injected faults before/after staging rename, CAS, publish, rollback;
 - sanitizer failure + invalid old-active + unknown provenance;
@@ -303,6 +317,7 @@ Required named tests:
 - failed/buffered write -> later ordinary Pi append -> restart;
 - fixed-mask near-offset `Δ_net`, authored replacement/copy taint, capHead change, guard off/on, resurrection/double-cap;
 - all compaction truth-table cells, stale estimate + queued failed commit with no subsequent context;
+- final-payload max-token gate: downstream growth/replacement leaves all three max-output fields unchanged; bounded payload permits lift; unknown/opaque payload denies lift;
 - no-budget/90%-soft/hard/hysteresis/growth cases;
 - full headerless rewrite retaining all owner turns and owner-body-edit allowance;
 - external write at last pre-publication boundary and during rollback;
