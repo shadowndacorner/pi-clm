@@ -376,7 +376,7 @@ interface RepairedGroups {
 	provenance: number[];
 }
 
-function repairToolGroups(messages: LiveContextMessage[]): LiveContextMessage[] {
+export function repairToolGroups(messages: LiveContextMessage[]): LiveContextMessage[] {
 	return repairToolGroupsWithProvenance(messages, messages.map((_, index) => index)).messages;
 }
 
@@ -406,14 +406,18 @@ function repairToolGroupsWithProvenance(messages: LiveContextMessage[], provenan
 			.filter((id) => id.length > 0);
 
 		const resultIds = new Set<string>();
+		let duplicateResult = false;
 		let cursor = index + 1;
 		while (cursor < repaired.length && repaired[cursor].role === "toolResult") {
 			const resultId = repaired[cursor].toolCallId;
-			if (typeof resultId === "string" && ids.has(resultId)) resultIds.add(resultId);
+			if (typeof resultId === "string" && ids.has(resultId)) {
+				if (resultIds.has(resultId)) duplicateResult = true;
+				resultIds.add(resultId);
+			}
 			cursor++;
 		}
 		const missing = orderedIds.filter((id) => !resultIds.has(id));
-		const complete = missing.length === 0;
+		const complete = missing.length === 0 && !duplicateResult;
 		if (complete) continue;
 
 
@@ -468,10 +472,21 @@ function repairToolGroupsWithProvenance(messages: LiveContextMessage[], provenan
 		const assistant = assistantIndex >= 0 ? repaired[assistantIndex] : undefined;
 		const ids = assistant?.role === "assistant" ? toolCallIds(assistant) : new Set<string>();
 		if (typeof message.toolCallId !== "string" || !ids.has(message.toolCallId)) {
-			// Orphan result: the assistant side is gone. Drop it — a text note would
-			// fabricate prose and the model asked for it to go.
-			dropAt(index, 1);
-			index -= 1;
+			// Orphan result: the assistant side is gone. Do not send its body as an
+			// unpaired provider tool result; replace it with static metadata only.
+			const tombstone: LiveContextMessage = {
+				role: "custom",
+				customType: "clm:terminal-orphan-result",
+				content: [{ type: "text", text: "[pi-clm] Terminalized orphan tool result; no provider-valid assistant call remains." }],
+				display: false,
+				timestamp: typeof message.timestamp === "number" ? message.timestamp : Date.now(),
+				details: {
+					toolCallId: message.toolCallId,
+					toolName: message.toolName,
+					tombstone: true,
+				},
+			};
+			repaired[index] = tombstone;
 		}
 	}
 
@@ -573,7 +588,7 @@ export function applyContextDocument(
 			const origin = candidateOrigins[candidateIndex];
 			if (!origin || origin.sourceIndex === undefined) return [];
 			const outputMessage = messages[outputIndex];
-			if (outputMessage?.role === "custom" && outputMessage.customType === "clm:terminal-incomplete") {
+			if (outputMessage?.role === "custom" && (outputMessage.customType === "clm:terminal-incomplete" || outputMessage.customType === "clm:terminal-orphan-result")) {
 				// The original assistant/source is explicitly removed; the tombstone is an addition.
 				return [{ sourceIndex: origin.sourceIndex, kind: "removed" as ContextEditSourceKind }];
 			}
@@ -604,7 +619,7 @@ export function applyContextDocument(
 			additions: repaired.provenance.flatMap((candidateIndex, outputIndex) => {
 				const origin = candidateOrigins[candidateIndex];
 				const outputMessage = messages[outputIndex];
-				if (outputMessage?.role === "custom" && outputMessage.customType === "clm:terminal-incomplete") {
+				if (outputMessage?.role === "custom" && (outputMessage.customType === "clm:terminal-incomplete" || outputMessage.customType === "clm:terminal-orphan-result")) {
 					return [{ outputIndex, kind: "added" as const }];
 				}
 				return origin && origin.sourceIndex === undefined ? [{ outputIndex, kind: "added" as const }] : [];

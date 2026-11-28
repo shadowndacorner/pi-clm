@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -15,7 +16,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
-import { applyContextDocument, renderContextDocument } from "./context-document.ts";
+import { applyContextDocument, digestMessages, renderContextDocument, repairToolGroups } from "./context-document.ts";
 import {
 	CONTINUITY_SIZE_WARNING_TOKENS,
 	DEFAULT_RECALL_TOKENS,
@@ -243,6 +244,21 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 	let store: MirrorStore | undefined;
 	let turnBaseline: TurnBaseline | undefined;
 	let lifecycleEpoch = 0;
+	let policyEpoch = 0;
+function textDigest(text: string): string {
+	return createHash("sha256").update(text).digest("hex");
+}
+
+function policyDigest(): string {
+	return createHash("sha256").update(JSON.stringify({
+		settings,
+		budgetPolicy,
+		observationCap,
+		overflowGuard,
+		nativeCompaction,
+	})).digest("hex");
+}
+
 	/** A /clm-tidy waiting for the agent to go idle; a second one is refused instead of racing it. */
 	let tidyPending = false;
 	let pendingNotice: string | undefined;
@@ -300,12 +316,23 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 		createdAt: string;
 		shape?: string;
 		queued: boolean;
+		sessionId: string;
+		lifecycleEpoch: number;
+		leafId: string | null;
+		policyEpoch: number;
+		settingsDigest: string;
+		renderedDigest?: string;
 	}
 	let pendingDraft: PendingDraft | undefined;
 	interface RuntimeActive {
 		revision: number;
 		checkpoint: ProjectionCheckpoint;
 		activatedAt: string;
+		sessionId: string;
+		lifecycleEpoch: number;
+		leafId: string | null;
+		policyEpoch: number;
+		settingsDigest: string;
 	}
 	/** CLM v1 active state is memory-only; durable checkpoint history remains in `state`. */
 	let runtimeActive: RuntimeActive | undefined;
@@ -383,6 +410,7 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 		steeringError = staged.steeringError;
 		loadedSteeringPath = next.steering;
 		settings = next;
+		policyEpoch += 1;
 		if (budgetChanged) {
 			budgetTracker.reset();
 			lastBudgetReading = undefined;
@@ -434,6 +462,7 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 		persistSettings(nextOverrides);
 		activateSettings(staged);
 		pendingDraft = undefined;
+		turnBaseline = undefined;
 		settingsOverrides = nextOverrides;
 		settingsWarning = undefined; // the saved entry is now well-formed
 		updateStatus(ctx);
@@ -445,6 +474,7 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 		persistSettings({});
 		activateSettings(staged);
 		pendingDraft = undefined;
+		turnBaseline = undefined;
 		settingsOverrides = {};
 		settingsWarning = undefined;
 		updateStatus(ctx);
@@ -636,9 +666,21 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 	function setEnabled(enabled: boolean, ctx: ExtensionContext): void {
 		if (enabled === state.enabled) return;
 		if (enabled) {
-			persistOutcome({ ...state, enabled: true, event: { kind: "enabled", at: new Date().toISOString() } });
+			persistOutcome({
+				...state,
+				enabled: true,
+				revision: state.revision + 1,
+				checkpoint: undefined,
+				event: { kind: "enabled", at: new Date().toISOString() },
+			});
 		} else {
-			persistOutcome({ ...state, enabled: false, event: { kind: "disabled", at: new Date().toISOString() } });
+			persistOutcome({
+				...state,
+				enabled: false,
+				revision: state.revision + 1,
+				checkpoint: undefined,
+				event: { kind: "disabled", at: new Date().toISOString() },
+			});
 			lifecycleEpoch++;
 			turnBaseline = undefined;
 			pendingDraft = undefined;
@@ -696,9 +738,15 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 	function commitPendingDraft(ctx: ExtensionContext, rawMessages: LiveContextMessage[]): void {
 		if (!pendingDraft || !pendingDraft.queued || quarantined !== undefined) return;
 		const draft = pendingDraft;
-		if (!state.enabled || draft.baseRevision !== activeRevision()) {
+		const leaseMismatch =
+			draft.sessionId !== ctx.sessionManager.getSessionId() ||
+			draft.lifecycleEpoch !== lifecycleEpoch ||
+			draft.leafId !== (ctx.sessionManager.getLeafId() ?? null) ||
+			draft.policyEpoch !== policyEpoch ||
+			draft.settingsDigest !== policyDigest();
+		if (!state.enabled || draft.baseRevision !== activeRevision() || leaseMismatch) {
 			pendingDraft = undefined;
-			queueOutcomeNotice("Queued draft was discarded because the active revision changed.");
+			queueOutcomeNotice("Queued draft was discarded because its lease changed.");
 			return;
 		}
 		const projected = applyProjection(rawMessages, draft.checkpoint);
@@ -707,11 +755,32 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 			queueOutcomeNotice(`Queued draft was discarded: ${projected.reason}`);
 			return;
 		}
+		// Explicit CLM commit must fit the guard limit after accounting for the raw suffix.
+		const resolved = resolveBudget(budgetPolicy, ctx.model?.contextWindow);
+		if (resolved && overflowGuard.mode === "withhold") {
+			const limit = overflowGuardLimit(resolved.budget, resolved.reserve, ctx.model?.contextWindow);
+			const effective = repairToolGroups(selectContextVisibleMessages(projected.messages));
+			const estimated = calibrator.apply(
+				estimateTextTokens(ctx.getSystemPrompt?.() ?? "") +
+				estimateLiveContextTokens(effective) +
+				estimateTextTokens(pendingNotice ?? ""),
+			);
+			if (limit > 0 && estimated > limit) {
+				pendingDraft = undefined;
+				queueOutcomeNotice(`Queued draft does not fit the guard limit (${estimated} > ${limit}); trim the mirror and commit again.`);
+                return;
+			}
+		}
 		pendingDraft = undefined;
 		runtimeActive = {
 			revision: draft.generation,
 			checkpoint: draft.checkpoint,
 			activatedAt: draft.createdAt,
+			sessionId: draft.sessionId,
+			lifecycleEpoch: draft.lifecycleEpoch,
+			leafId: draft.leafId,
+			policyEpoch: draft.policyEpoch,
+			settingsDigest: draft.settingsDigest,
 		};
 		awaitObservationForRevision = draft.generation;
 		lastBudgetReading = undefined;
@@ -817,6 +886,18 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 			entries.push({ id, messages: Array.isArray(entry.messages) ? (entry.messages as LiveContextMessage[]) : [] });
 		}
 		return entries;
+	}
+
+	/**
+	 * Verify the event-message ledger against the host session ledger. If a downstream
+	 * handler rewrote the messages, provenance is unknown; fail closed with a sanitized
+	 * projection instead of sending unverified raw event messages.
+	 */
+	function rawLedgerMatches(ctx: ExtensionContext, rawMessages: LiveContextMessage[]): boolean {
+		const entries = branchEntries(ctx);
+		if (!entries) return true;
+		const ledgerMessages = entries.flatMap((entry) => entry.messages);
+		return digestMessages(ledgerMessages) === digestMessages(rawMessages);
 	}
 
 	/** Entry refs for the raw prefix a new checkpoint anchors to. */
@@ -1136,6 +1217,12 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 				pendingDraft = undefined;
 				throw new Error("The draft's base revision changed; edit and commit again.");
 			}
+			if (pendingDraft.renderedDigest !== undefined && store) {
+				const current = await store.read();
+				if (current === undefined || textDigest(current) !== pendingDraft.renderedDigest) {
+					throw new Error("The mirror changed after its draft was rendered; commit is refused until the edit is accepted on a later turn.");
+				}
+			}
 			if (pendingDraft.queued) {
 				return {
 					content: [{ type: "text", text: `Draft revision ${pendingDraft.generation} is already queued.` }],
@@ -1411,12 +1498,24 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 				ctx.ui.notify(store?.filePath ?? "Live-context mirror is unavailable.", store ? "info" : "warning");
 				return;
 			case "on":
-				persistOutcome({ ...state, enabled: true, event: { kind: "enabled", at: new Date().toISOString() } });
+				persistOutcome({
+					...state,
+					enabled: true,
+					revision: state.revision + 1,
+					checkpoint: undefined,
+					event: { kind: "enabled", at: new Date().toISOString() },
+				});
 				updateStatus(ctx);
 				ctx.ui.notify("Live context enabled.", "info");
 				return;
 			case "off":
-				persistOutcome({ ...state, enabled: false, event: { kind: "disabled", at: new Date().toISOString() } });
+				persistOutcome({
+					...state,
+					enabled: false,
+					revision: state.revision + 1,
+					checkpoint: undefined,
+					event: { kind: "disabled", at: new Date().toISOString() },
+				});
 				lifecycleEpoch++;
 				turnBaseline = undefined;
 				pendingDraft = undefined;
@@ -1527,6 +1626,26 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 			return output.length === rawMessages.length ? undefined : { messages: asAgentMessages(output) };
 		}
 
+		if (!rawLedgerMatches(ctx, rawMessages)) {
+			pendingDraft = undefined;
+			runtimeActive = undefined;
+			turnBaseline = undefined;
+			lastBudgetReading = undefined;
+			currentContextView = undefined;
+			const message = "Raw event messages do not match the verified session ledger; provenance is unknown, so tool results were withheld and the staged commit was discarded.";
+			queueOutcomeNotice(message);
+			ctx.ui.notify(`pi-clm: ${message}`, "error");
+			const safe = rawMessages.filter((m) => m.role !== "toolResult");
+			safe.push({
+				role: "custom",
+				customType: NOTICE_TYPE,
+				content: message,
+				display: false,
+				timestamp: Date.now(),
+			});
+			return { messages: asAgentMessages(safe) };
+		}
+
 		// Activate any accepted draft at this verified context boundary before rendering.
 		commitPendingDraft(ctx, rawMessages);
 
@@ -1589,7 +1708,16 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 				(details.length > 0 ? `; ${details.join(" and ")}` : "") +
 				` as revision ${rebased.revision}.`;
 			if (editingMode === "clm") {
-				runtimeActive = { revision: rebased.revision, checkpoint: rebased, activatedAt: rebased.createdAt };
+				runtimeActive = {
+					revision: rebased.revision,
+					checkpoint: rebased,
+					activatedAt: rebased.createdAt,
+					sessionId: ctx.sessionManager.getSessionId(),
+					lifecycleEpoch,
+					leafId: ctx.sessionManager.getLeafId() ?? null,
+					policyEpoch,
+					settingsDigest: policyDigest(),
+				};
 			} else {
 				persist({
 					version: 1,
@@ -1656,6 +1784,7 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 		}
 		const visibleRawMessages = selectContextVisibleMessages(rawMessages);
 		effectiveMessages = selectContextVisibleMessages(effectiveMessages);
+		effectiveMessages = repairToolGroups(effectiveMessages);
 		if (editingMode === "clm") effectiveMessages = capObservations(effectiveMessages, observationCap);
 		pendingOverflowNotice = undefined;
 		// Learn from the provider's count of the previous request before estimating this one.
@@ -1727,6 +1856,7 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 		});
 		try {
 			await store.write(snapshot.text);
+			if (pendingDraft) pendingDraft.renderedDigest = textDigest(snapshot.text);
 			turnBaseline = {
 				rawMessages: [...rawMessages],
 				effectiveMessages: [...mirrorMessages],
@@ -1773,7 +1903,7 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 	});
 
 	pi.on("session_before_compact", async (event, ctx) => {
-		if (editingMode !== "clm" || nativeCompaction === "on" || event.reason === "manual") return undefined;
+		if (editingMode !== "clm" || !state.enabled || nativeCompaction === "on" || event.reason === "manual") return undefined;
 		if (nativeCompaction === "off") {
 			queueOutcomeNotice(
 				`Pi's automatic compaction (${event.reason}) was cancelled: pi-clm manages this context. Edit the mirror to free space.`,
@@ -1980,6 +2110,11 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 				createdAt: at,
 				shape,
 				queued: false,
+				sessionId: ctx.sessionManager.getSessionId(),
+				lifecycleEpoch,
+				leafId: ctx.sessionManager.getLeafId() ?? null,
+				policyEpoch,
+				settingsDigest: policyDigest(),
 			};
 			if (replacedQueued) queueOutcomeNotice("The queued draft was replaced by a newer draft; commit again.");
 		} else {

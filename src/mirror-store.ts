@@ -42,6 +42,8 @@ export class MirrorStore {
 	readonly directory: string;
 	readonly filePath: string;
 	private disposed = false;
+	/** Monotonic generation of extension-authored mirror writes. */
+	private generation = 0;
 
 	private constructor(directory: string) {
 		this.directory = directory;
@@ -60,17 +62,24 @@ export class MirrorStore {
 		return new MirrorStore(directory);
 	}
 
-	async write(content: string): Promise<void> {
+	async write(content: string, generation = this.generation + 1): Promise<void> {
 		if (this.disposed) throw new Error("Mirror store has been disposed.");
+		if (generation < this.generation) throw new Error("Stale mirror generation: a newer snapshot already exists.");
 		const temporaryPath = join(this.directory, `.${basename(this.filePath)}.${randomUUID()}.tmp`);
 		try {
 			await writeFile(temporaryPath, content, { encoding: "utf8", mode: 0o600, flag: "wx" });
 			await rename(temporaryPath, this.filePath);
 			await chmod(this.filePath, 0o600);
+			this.generation = generation;
 		} catch (error) {
 			await rm(temporaryPath, { force: true }).catch(() => undefined);
 			throw error;
 		}
+	}
+
+	/** Current extension-authored mirror generation; model edits do not advance it. */
+	currentGeneration(): number {
+		return this.generation;
 	}
 
 	async read(): Promise<string | undefined> {

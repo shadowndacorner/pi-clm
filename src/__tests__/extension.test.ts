@@ -1624,6 +1624,39 @@ describe("pi-clm entry point", () => {
 			assert.doesNotMatch(await clmSettingsText(harness), /max_tokens clamp lifted/);
 		} finally { await emit(harness, "session_shutdown", {}); }
 	});
+	test("CLM accepts a second edit against the draft cursor and commits the newer generation", async () => {
+		const harness = createHarness();
+		liveContextExtension(harness.pi, { editingMode: "clm" });
+		await emit(harness, "session_start", { reason: "startup" });
+		const raw = rawConversation();
+		await emit(harness, "context", { type: "context", messages: raw });
+		const before = await emit(harness, "before_agent_start", {
+			type: "before_agent_start",
+			systemPrompt: "base",
+			prompt: "task",
+			systemPromptOptions: {},
+		});
+		const mirrorPath = String(before[0].systemPrompt).match(/mirrored at `([^`]+)`/)![1];
+		await writeFile(mirrorPath, compactSecondTurn(await readFile(mirrorPath, "utf8")), "utf8");
+		await emit(harness, "turn_end", { type: "turn_end", message: {}, toolResults: [] });
+		// Render the draft without committing: this establishes the draft cursor for a second edit.
+		const draftContext = await emit(harness, "context", { type: "context", messages: raw });
+		assert.equal(harness.branch.filter((entry) => entry.customType === LIVE_CONTEXT_STATE).length, 0);
+		const draftMirror = await readFile(mirrorPath, "utf8");
+		await writeFile(mirrorPath, draftMirror.replace("Investigation complete: parser.ts is the only relevant file.", "Draft two: parser.ts is the only relevant file."), "utf8");
+		await emit(harness, "turn_end", { type: "turn_end", message: {}, toolResults: [] });
+		const commit = harness.tools.get("live_context_commit");
+		await commit.execute("commit-2", {}, undefined, undefined, harness.ctx);
+		const projected = await emit(harness, "context", { type: "context", messages: raw });
+		assert.match(JSON.stringify(projected[0].messages), /Draft two: parser\.ts is the only relevant file\./);
+		assert.doesNotMatch(JSON.stringify(projected[0].messages), /Investigation complete/);
+		const notices = projected[0].messages
+			.filter((message: LiveContextMessage) => message.customType === "live-context-notice")
+			.map((message: LiveContextMessage) => String(message.content));
+		assert.ok(notices.some((text: string) => /Committed revision 2/.test(text)), `expected revision 2: ${notices.join(" | ")}`);
+		void draftContext;
+		await emit(harness, "session_shutdown", {});
+	});
 	test("CLM queues an accepted draft and exposes the commit tool", async () => {
 		const harness = createHarness();
 		liveContextExtension(harness.pi, { editingMode: "clm" });
