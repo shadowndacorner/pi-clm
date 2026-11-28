@@ -125,6 +125,8 @@ import {
 
 const STATUS_KEY = "live-context";
 const NOTICE_TYPE = "live-context-notice";
+/** Conservative token allowance for notices emitted after a CLM commit. */
+const COMMIT_NOTICE_MARGIN_TOKENS = 512;
 const CONTINUITY_MESSAGE_TYPE = "live-context-continuity";
 const EXTENSION_DIR = dirname(fileURLToPath(import.meta.url));
 
@@ -669,21 +671,21 @@ function policyDigest(): string {
 		verificationContext = ctx;
 		if (enabled === state.enabled) return;
 		if (enabled) {
-			persistOutcome({
+			if (!persistOutcomeDurable({
 				...state,
 				enabled: true,
 				revision: state.revision + 1,
 				checkpoint: undefined,
 				event: { kind: "enabled", at: new Date().toISOString() },
-			});
+			}, ctx)) return;
 		} else {
-			persistOutcome({
+			if (!persistOutcomeDurable({
 				...state,
 				enabled: false,
 				revision: state.revision + 1,
 				checkpoint: undefined,
 				event: { kind: "disabled", at: new Date().toISOString() },
-			});
+			}, ctx)) return;
 			lifecycleEpoch++;
 			turnBaseline = undefined;
 			pendingDraft = undefined;
@@ -768,6 +770,38 @@ function verifyCustomEntry(ctx: ExtensionContext, expected: unknown): void {
 		state = nextState;
 	}
 
+	/** A durable transition failure must quarantine the runtime, not leave a phantom checkpoint usable. */
+	function quarantineDurableFailure(error: unknown, ctx?: ExtensionContext): void {
+		const message = `Durable CLM state transition failed: ${error instanceof Error ? error.message : String(error)}.`;
+		quarantined = message;
+		runtimeActive = undefined;
+		pendingDraft = undefined;
+		turnBaseline = undefined;
+		currentContextView = undefined;
+		queueOutcomeNotice(message);
+		ctx?.ui?.notify(`pi-clm: ${message}`, "error");
+	}
+
+	function persistDurable(nextState: typeof state, ctx?: ExtensionContext): boolean {
+		try {
+			persist(nextState);
+			return true;
+		} catch (error) {
+			quarantineDurableFailure(error, ctx);
+			return false;
+		}
+	}
+
+	function persistOutcomeDurable(nextState: typeof state, ctx?: ExtensionContext): boolean {
+		try {
+			persistOutcome(nextState);
+			return true;
+		} catch (error) {
+			quarantineDurableFailure(error, ctx);
+			return false;
+		}
+	}
+
 	/** CLM rejections are volatile; only off/reset/native compaction are durable transitions. */
 	function recordRejection(message: string, beforeTokens: number, afterTokens: number, at: string): void {
 		const lastOutcome = {
@@ -781,7 +815,7 @@ function verifyCustomEntry(ctx: ExtensionContext, expected: unknown): void {
 		if (editingMode === "clm") {
 			state = { ...state, event: undefined, lastOutcome };
 		} else {
-			persistOutcome({ ...state, event: undefined, lastOutcome });
+			persistOutcomeDurable({ ...state, event: undefined, lastOutcome });
 		}
 		queueOutcomeNotice(`Edit rejected: ${message}`);
 	}
@@ -836,7 +870,14 @@ function verifyCustomEntry(ctx: ExtensionContext, expected: unknown): void {
 			observationCap,
 		);
 		if (limit !== undefined && limit > 0) {
-			const fixedTokens = calibrator.apply(estimateTextTokens(ctx.getSystemPrompt?.() ?? "") + estimateTextTokens(pendingNotice ?? ""));
+			const commitNotice = `Committed revision ${draft.generation} at the next context boundary.${draft.shape ? ` ${draft.shape}` : ""}`;
+			const fixedTokens =
+				calibrator.apply(
+					estimateTextTokens(ctx.getSystemPrompt?.() ?? "") +
+					estimateTextTokens(pendingNotice ?? "") +
+					estimateTextTokens(commitNotice),
+				) +
+				COMMIT_NOTICE_MARGIN_TOKENS;
 			if (overflowGuard.mode === "withhold") {
 				const visibleSuffix = selectContextVisibleMessages(projected.suffix);
 				const guarded = applyOverflowGuard(mirrorMessages, {
@@ -863,11 +904,28 @@ function verifyCustomEntry(ctx: ExtensionContext, expected: unknown): void {
 			lockedIndexes: lockedRepresentationIndexes(mirrorMessages),
 			documentSeed: `${ctx.sessionManager.getSessionId()}:${draft.checkpoint.sourceDigest}`,
 		});
+		const activeStore = store;
 		try {
-			await store.write(snapshot.text);
+			await activeStore.write(snapshot.text);
 		} catch (error) {
 			pendingDraft = undefined;
 			queueOutcomeNotice(`Queued draft publication failed: ${error instanceof Error ? error.message : String(error)}`);
+			return;
+		}
+		// The await is a lease boundary: tree navigation, off/reset, or store replacement
+		// can happen while publication is in flight. Recheck before activating.
+		const leaseStillValid =
+			store === activeStore &&
+			state.enabled &&
+			lifecycleEpoch === draft.lifecycleEpoch &&
+			ctx.sessionManager.getSessionId() === draft.sessionId &&
+			(ctx.sessionManager.getLeafId() ?? null) === draft.leafId &&
+			policyEpoch === draft.policyEpoch &&
+			policyDigest() === draft.settingsDigest &&
+			draft.baseRevision === activeRevision();
+		if (!leaseStillValid) {
+			pendingDraft = undefined;
+			queueOutcomeNotice("Queued draft was discarded because its lease changed during publication.");
 			return;
 		}
 		pendingDraft = undefined;
@@ -1633,24 +1691,24 @@ function verifyCustomEntry(ctx: ExtensionContext, expected: unknown): void {
 				ctx.ui.notify(store?.filePath ?? "Live-context mirror is unavailable.", store ? "info" : "warning");
 				return;
 			case "on":
-				persistOutcome({
+				if (!persistOutcomeDurable({
 					...state,
 					enabled: true,
 					revision: state.revision + 1,
 					checkpoint: undefined,
 					event: { kind: "enabled", at: new Date().toISOString() },
-				});
+				}, ctx)) return;
 				updateStatus(ctx);
 				ctx.ui.notify("Live context enabled.", "info");
 				return;
 			case "off":
-				persistOutcome({
+				if (!persistOutcomeDurable({
 					...state,
 					enabled: false,
 					revision: state.revision + 1,
 					checkpoint: undefined,
 					event: { kind: "disabled", at: new Date().toISOString() },
-				});
+				}, ctx)) return;
 				lifecycleEpoch++;
 				turnBaseline = undefined;
 				pendingDraft = undefined;
@@ -1662,7 +1720,7 @@ function verifyCustomEntry(ctx: ExtensionContext, expected: unknown): void {
 				ctx.ui.notify("Live context disabled. Raw Pi context will be used.", "info");
 				return;
 			case "reset":
-				persist(resetProjectionState(state, "Projection reset by user."));
+				if (!persistDurable(resetProjectionState(state, "Projection reset by user."), ctx)) return;
 				lifecycleEpoch++;
 				turnBaseline = undefined;
 				pendingDraft = undefined;
@@ -1771,7 +1829,7 @@ function verifyCustomEntry(ctx: ExtensionContext, expected: unknown): void {
 			currentContextView = undefined;
 			const message = "Raw event messages do not match the verified session ledger; provenance is unknown, so unverified origins were withheld and the staged commit was discarded.";
 			const reset = resetProjectionState(state, message);
-			persist(reset);
+			persistDurable(reset, ctx);
 			queueOutcomeNotice(message);
 			ctx.ui.notify(`pi-clm: ${message}`, "error");
 			// Use only the verified ledger. No role-based filter is safe: an upstream rewrite
@@ -1920,7 +1978,18 @@ function verifyCustomEntry(ctx: ExtensionContext, expected: unknown): void {
 			invalidationStreak += 1;
 			runtimeActive = undefined;
 			pendingDraft = undefined;
-			persist(resetProjectionState(state, projection.reason));
+			if (!persistDurable(resetProjectionState(state, projection.reason), ctx)) {
+				const ledger = ledgerMessages(ctx);
+				const safe = ledger ? selectContextVisibleMessages(ledger) : [];
+				safe.push({
+					role: "custom",
+					customType: NOTICE_TYPE,
+					content: `Durable reset failed; using only the verified ledger. ${quarantined ?? ""}`,
+					display: false,
+					timestamp: Date.now(),
+				});
+				return { messages: asAgentMessages(safe) };
+			}
 			// The meter must follow the history that is actually sent: a reading taken from the
 			// dropped projection would keep quoting a context that no longer exists.
 			lastBudgetReading = undefined;
@@ -2058,6 +2127,9 @@ function verifyCustomEntry(ctx: ExtensionContext, expected: unknown): void {
 				timestamp: Date.now(),
 			});
 		}
+		// The compaction-cancellation reading must include the notices that are actually
+		// appended to the provider request, not just the projection plus continuity.
+		if (currentContextView) currentContextView.effectiveTokens = estimateLiveContextTokens(output);
 		if (editingMode === "clm") {
 			calibrator.record(
 				estimateTextTokens(ctx.getSystemPrompt?.() ?? "") + estimateLiveContextTokens(output),

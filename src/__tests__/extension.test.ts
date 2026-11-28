@@ -1734,3 +1734,54 @@ describe("pi-clm entry point", () => {
 		await emit(harness, "session_shutdown", {});
 	});
 });
+
+describe("pi-clm lease and durability boundaries", () => {
+	test("CLM: a tree move during publication invalidates the queued draft", async (t) => {
+		const harness = createHarness();
+		liveContextExtension(harness.pi, { editingMode: "clm" });
+		await emit(harness, "session_start", { reason: "startup" });
+		try {
+			const raw = rawConversation();
+			await emit(harness, "context", { type: "context", messages: raw });
+			const before = await emit(harness, "before_agent_start", { systemPrompt: "base" });
+			const path = String(before[0].systemPrompt).match(/mirrored at `([^`]+)`/)![1];
+			await writeFile(path, compactSecondTurn(await readFile(path, "utf8")), "utf8");
+			await emit(harness, "turn_end", { type: "turn_end", message: {}, toolResults: [] });
+			await harness.tools.get("live_context_commit").execute("commit-1", {}, undefined, undefined, harness.ctx);
+
+			const original = MirrorStore.prototype.write;
+			let finish!: () => void;
+			let first = true;
+			t.mock.method(MirrorStore.prototype, "write", async function (this: MirrorStore, content: string, generation?: number) {
+				if (first) {
+					first = false;
+					return new Promise<void>((resolve) => { finish = resolve; });
+				}
+				return original.call(this, content, generation);
+			});
+			const pending = emit(harness, "context", { type: "context", messages: raw });
+			await emit(harness, "session_tree", {});
+			finish();
+			await pending;
+			const after = await emit(harness, "context", { type: "context", messages: raw });
+			assert.doesNotMatch(JSON.stringify(after[0].messages), /Investigation complete/);
+			assert.match(JSON.stringify(after[0].messages), /lease changed during publication/);
+		} finally { await emit(harness, "session_shutdown", {}); }
+	});
+
+	test("CLM: failed durable off quarantines instead of reusing the checkpoint", async () => {
+		const harness = createHarness();
+		liveContextExtension(harness.pi, { editingMode: "clm" });
+		await emit(harness, "session_start", { reason: "startup" });
+		try {
+			const raw = rawConversation();
+			await emit(harness, "context", { type: "context", messages: raw });
+			await emit(harness, "turn_end", { type: "turn_end", message: {}, toolResults: [] });
+			harness.pi.appendEntry = () => { throw new Error("simulated durable append failure"); };
+			await harness.commands.get("clm").handler("off", harness.ctx);
+			const result = await emit(harness, "context", { type: "context", messages: raw });
+			assert.ok(harness.notifications.some((notice) => /Durable CLM state transition failed/.test(notice)));
+			assert.doesNotMatch(JSON.stringify(result[0].messages), /Investigation complete/);
+		} finally { await emit(harness, "session_shutdown", {}); }
+	});
+});

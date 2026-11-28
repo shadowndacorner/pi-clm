@@ -439,3 +439,41 @@ describe("CLM-owned representations", () => {
 		assert.doesNotMatch(JSON.stringify(tombstone.content), /second body/);
 	});
 });
+
+describe("duplicate call identity", () => {
+	test("a paired repeated call id is terminalized as a whole group", () => {
+		const messages: LiveContextMessage[] = [
+			{ role: "user", content: "Start", timestamp: 1 },
+			{
+				role: "assistant",
+				content: [{ type: "text", text: "First call." }, toolCall("c1", "cat file")],
+				api: "test",
+				provider: "test",
+				model: "test",
+				usage: { cost: { total: 0 } },
+				stopReason: "toolUse",
+				timestamp: 2,
+			},
+			{ role: "toolResult", toolCallId: "c1", toolName: "bash", content: [{ type: "text", text: "first body" }], isError: false, timestamp: 3 },
+			{ role: "user", content: "Again", timestamp: 4 },
+			{
+				role: "assistant",
+				content: [{ type: "text", text: "Second call." }, toolCall("c1", "cat file")],
+				api: "test",
+				provider: "test",
+				model: "test",
+				usage: { cost: { total: 0 } },
+				stopReason: "toolUse",
+				timestamp: 5,
+			},
+			{ role: "toolResult", toolCallId: "c1", toolName: "bash", content: [{ type: "text", text: "second body" }], isError: false, timestamp: 6 },
+		];
+		const snapshot = renderContextDocument(messages, { revision: 4 });
+		const result = applyContextDocument(replaceBody(snapshot, 0, "Start now"), snapshot, { requireShrink: false });
+		assert.equal(result.accepted, true);
+		assert.equal(hasOrphanToolMessages(result.messages), false);
+		const duplicate = result.messages.find((message) => message.customType === "clm:terminal-duplicate-group");
+		assert.ok(duplicate, "the repeated paired call is terminalized as a whole group");
+		assert.doesNotMatch(JSON.stringify(result.messages), /second body/);
+	});
+});

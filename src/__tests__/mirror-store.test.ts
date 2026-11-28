@@ -72,3 +72,14 @@ describe("MirrorStore", () => {
 		});
 	});
 });
+
+describe("MirrorStore generation CAS", () => {
+	test("a losing writer cannot publish rejected bytes", async () => {
+		await withParent(async (parent) => {
+			const store = await MirrorStore.create("session", parent);
+			await store.write("accepted", 1);
+			await assert.rejects(store.write("rejected", 1), /Stale mirror generation/);
+			assert.equal(await store.read(), "accepted");
+		});
+	});
+});

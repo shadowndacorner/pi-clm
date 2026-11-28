@@ -62,24 +62,32 @@ export class MirrorStore {
 		return new MirrorStore(directory);
 	}
 
+	private publicationChain: Promise<void> = Promise.resolve();
+
 	async write(content: string, generation = this.generation + 1): Promise<void> {
-		if (this.disposed) throw new Error("Mirror store has been disposed.");
-		const previousGeneration = this.generation;
-		if (generation <= previousGeneration) throw new Error("Stale mirror generation: a newer snapshot already exists.");
-		const temporaryPath = join(this.directory, `.${basename(this.filePath)}.${randomUUID()}.tmp`);
-		try {
-			await writeFile(temporaryPath, content, { encoding: "utf8", mode: 0o600, flag: "wx" });
-			await rename(temporaryPath, this.filePath);
-			await chmod(this.filePath, 0o600);
-			// A concurrent publication that advanced the generation invalidates this write.
-			if (this.generation !== previousGeneration) {
-				throw new Error("Mirror generation changed during publication; this snapshot was not activated.");
+		// Serialize publications. Check the generation inside the lock and preserve
+		// permissions on the temp file so a losing writer cannot rename rejected bytes.
+		const run = this.publicationChain.then(async () => {
+			if (this.disposed) throw new Error("Mirror store has been disposed.");
+			const previousGeneration = this.generation;
+			if (generation <= previousGeneration) {
+				throw new Error("Stale mirror generation: a newer snapshot already exists.");
 			}
-			this.generation = generation;
-		} catch (error) {
-			await rm(temporaryPath, { force: true }).catch(() => undefined);
-			throw error;
-		}
+			const temporaryPath = join(this.directory, `.${basename(this.filePath)}.${randomUUID()}.tmp`);
+			try {
+				await writeFile(temporaryPath, content, { encoding: "utf8", mode: 0o600, flag: "wx" });
+				if (this.generation !== previousGeneration) {
+					throw new Error("Mirror generation changed before publication.");
+				}
+				await rename(temporaryPath, this.filePath);
+				this.generation = generation;
+			} catch (error) {
+				await rm(temporaryPath, { force: true }).catch(() => undefined);
+				throw error;
+			}
+		});
+		this.publicationChain = run.catch(() => undefined);
+		return run;
 	}
 
 	/** Current extension-authored mirror generation; model edits do not advance it. */

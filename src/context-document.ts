@@ -516,6 +516,37 @@ function repairToolGroupsWithProvenance(messages: LiveContextMessage[], provenan
 		seenToolCallIds.add(message.toolCallId);
 	}
 
+	// Final pairing validation: duplicate-result tombstoning can leave a later assistant
+	// call with no provider-valid result. Terminalize the whole physical group instead
+	// of sending an assistant call that the provider cannot pair.
+	for (let index = 0; index < repaired.length; index++) {
+		const message = repaired[index];
+		if (message.role !== "assistant") continue;
+		const ids = toolCallIds(message);
+		if (ids.size === 0) continue;
+		let cursor = index + 1;
+		const found = new Set<string>();
+		while (cursor < repaired.length && repaired[cursor].role === "toolResult") {
+			const resultId = repaired[cursor].toolCallId;
+			if (typeof resultId === "string" && ids.has(resultId)) found.add(resultId);
+			cursor++;
+		}
+		if ([...ids].every((id) => found.has(id))) continue;
+		const tombstone: LiveContextMessage = {
+			role: "custom",
+			customType: "clm:terminal-duplicate-group",
+			content: [{ type: "text", text: "[pi-clm] Terminalized duplicate/incomplete tool-call group; no provider-valid call/result pair remains." }],
+			display: false,
+			timestamp: typeof message.timestamp === "number" ? message.timestamp : Date.now(),
+			details: { toolCallIds: [...ids], tombstone: true },
+		};
+		const assistantOrigin = originOf[index];
+		dropAt(index, cursor - index);
+		repaired.splice(index, 0, tombstone);
+		originOf.splice(index, 0, assistantOrigin);
+		index -= 1;
+	}
+
 	return { messages: repaired, provenance: originOf };
 }
 
