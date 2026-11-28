@@ -239,6 +239,9 @@ const FOREIGN_HEADER_RE =
 const REWRITE_DECL_RE =
 	/^\[\[CLM REWRITE revision=(\d+) document=([0-9a-f]{64}) reason=(.+?)\]\]$/;
 
+/** Recognizes declaration-shaped markers, including whitespace variants, in body lines. */
+const REWRITE_MARKER_RE = /\[\[\s*CLM\s+REWRITE\b/gi;
+
 interface RewriteDeclaration {
 	revision: number;
 	documentId: string;
@@ -250,25 +253,35 @@ interface RewriteParseResult {
 	error?: string;
 }
 
+function rewriteMarkerCount(line: string): number {
+	return line.match(REWRITE_MARKER_RE)?.length ?? 0;
+}
+
 function parseRewriteDeclaration(text: string, snapshot: ContextDocumentSnapshot): RewriteParseResult {
 	const contentLines = text
 		.split(/\r?\n/)
 		.map((line) => line.trim())
 		.filter((line) => line.length > 0 && !META_RE.test(`${line}\n`) && !line.startsWith("# Edit bodies or delete editable CTX_TURN blocks."));
-	const declarationLines = contentLines.filter((line) => line.startsWith("[[CLM REWRITE"));
-	if (declarationLines.length !== 1) {
-		return {
-			error: declarationLines.length === 0
-				? "no CLM REWRITE declaration"
-				: `expected exactly one CLM REWRITE declaration, found ${declarationLines.length}`,
-		};
+	const firstLine = contentLines[0];
+	if (!firstLine) return { error: "no CLM REWRITE declaration" };
+	const firstLineMarkers = rewriteMarkerCount(firstLine);
+	if (firstLineMarkers === 0) {
+		return { error: "the first content line must be a CLM REWRITE declaration" };
 	}
-	if (contentLines[0] !== declarationLines[0]) {
-		return { error: "the CLM REWRITE declaration must be the first content line" };
+	if (firstLineMarkers !== 1) {
+		return { error: "the CLM REWRITE declaration must be one complete line, not multiple declarations" };
 	}
-	const match = REWRITE_DECL_RE.exec(declarationLines[0]);
+	// Exactly one leading declaration; any later declaration-shaped line is rejected, not
+	// silently folded into the notes body. This includes malformed whitespace variants.
+	if (contentLines.slice(1).some((line) => rewriteMarkerCount(line) > 0)) {
+		return { error: "additional or malformed CLM REWRITE declaration(s) after the first content line" };
+	}
+	const match = REWRITE_DECL_RE.exec(firstLine);
 	if (!match) return { error: "malformed CLM REWRITE declaration" };
 	const reason = match[3].trim();
+	if (reason.includes("]]") || rewriteMarkerCount(reason) > 0) {
+		return { error: "CLM REWRITE reason contains an embedded closing delimiter or nested declaration" };
+	}
 	if (!reason) return { error: "CLM REWRITE declaration must state a reason" };
 	const declaration: RewriteDeclaration = { revision: Number(match[1]), documentId: match[2], reason };
 	if (declaration.revision !== snapshot.revision || declaration.documentId !== snapshot.documentId) {

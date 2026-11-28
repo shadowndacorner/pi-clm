@@ -130,6 +130,27 @@ describe("headerless collapse gate (CLM mode)", () => {
 		assert.match(result.diagnostics.join(" "), /Accepted a full rewrite/);
 	});
 
+	test("rewrite declaration must be strictly single, leading, and syntactically complete", () => {
+		const current = renderContextDocument(conversation(), { revision: 0, protectedIndexes: new Set(), documentSeed: "s" });
+		const summary = "# Context Summary\n- rewrite body";
+		const first = `[[CLM REWRITE revision=0 document=${current.documentId} reason=localized trims cannot free enough room]]`;
+
+		const duplicate = `${first}\n${first}\n${summary}`;
+		const duplicateResult = applyContextDocument(duplicate, current, clm);
+		assert.equal(duplicateResult.accepted, false);
+		assert.match(duplicateResult.reason ?? "", /additional|exactly one|after the first/i);
+
+		const malformedSecond = `${first}\n[[CLM  REWRITE revision=0 document=${current.documentId} reason=second]]\n${summary}`;
+		const malformedResult = applyContextDocument(malformedSecond, current, clm);
+		assert.equal(malformedResult.accepted, false);
+		assert.match(malformedResult.reason ?? "", /additional|malformed/i);
+
+		const concatenated = `${first}[[CLM REWRITE revision=0 document=${current.documentId} reason=second]]\n${summary}`;
+		const concatenatedResult = applyContextDocument(concatenated, current, clm);
+		assert.equal(concatenatedResult.accepted, false);
+		assert.match(concatenatedResult.reason ?? "", /complete line|multiple|embedded/i);
+	});
+
 	test("removing an owner turn's block is rejected; editing its body is allowed", () => {
 		const current = renderContextDocument(conversation(), { revision: 0, protectedIndexes: new Set(), documentSeed: "s" });
 		const [lastUserHeader] = headerLines(current, (line) => line.includes("role=user")).slice(-1);
