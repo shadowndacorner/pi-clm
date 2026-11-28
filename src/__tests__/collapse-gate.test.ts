@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 
-import { applyContextDocument, renderContextDocument } from "../context-document.ts";
+import { applyContextDocument, renderContextDocument, repairToolGroups } from "../context-document.ts";
 import type { ContextDocumentSnapshot, LiveContextMessage } from "../types.ts";
 
 const clm = { editingMode: "clm" as const };
@@ -114,10 +114,11 @@ describe("headerless collapse gate (CLM mode)", () => {
 		assert.equal(result.accepted, true, result.reason);
 	});
 
-	test("a headerless rewrite remains available and keeps every owner turn", () => {
+	test("a declared headerless rewrite remains available and keeps every owner turn", () => {
 		const current = renderContextDocument(conversation(), { revision: 0, protectedIndexes: new Set(), documentSeed: "s" });
 		const summary = "# Context Summary\n## Found so far\n- SECRET=42\n## Next\n- write the report";
-		const result = applyContextDocument(summary, current, clm);
+		const rewrite = `[[CLM REWRITE revision=0 document=${current.documentId} reason=localized trims cannot free enough room]]\n${summary}`;
+		const result = applyContextDocument(rewrite, current, clm);
 
 		assert.equal(result.accepted, true, result.reason);
 		const keptUserTurns = result.messages.filter((message) => message.role === "user");
@@ -165,5 +166,32 @@ describe("headerless collapse gate (CLM mode)", () => {
 		const conservative = renderContextDocument(messages, { revision: 0 });
 		const summary = "# Summary\n- SECRET=42";
 		assert.equal(applyContextDocument(summary, conservative, {}).accepted, false, "headerless rewrites stay rejected in conservative mode");
+	});
+});
+
+describe("CLM identity and tool-group invariants", () => {
+	test("an owner block cannot be demoted to notes", () => {
+		const current = renderContextDocument(conversation(), { revision: 0, protectedIndexes: new Set(), documentSeed: "s" });
+		const demoted = current.text.replace("role=user id=", "role=notes id=");
+		const result = applyContextDocument(demoted, current, clm);
+		assert.equal(result.accepted, false, result.reason);
+		assert.match(result.reason ?? "", /demoted|role=user/i, result.reason);
+	});
+
+	test("two calls with the same id inside one assistant message cannot be satisfied by one result", () => {
+		const messages: LiveContextMessage[] = [
+			{ role: "user", content: "task", timestamp: 1 },
+			{
+				role: "assistant",
+				content: [
+					{ type: "toolCall", id: "dup", name: "read", arguments: { path: "a" } },
+					{ type: "toolCall", id: "dup", name: "read", arguments: { path: "b" } },
+				],
+				timestamp: 2,
+			} as LiveContextMessage,
+			{ role: "toolResult", toolCallId: "dup", toolName: "read", content: [{ type: "text", text: "one result" }], timestamp: 3 } as LiveContextMessage,
+		];
+		const repaired = repairToolGroups(messages);
+		assert.ok(repaired.some((message) => message.customType === "clm:terminal-incomplete" || message.customType === "clm:terminal-duplicate-group" || message.customType === "clm:terminal-duplicate-result"));
 	});
 });

@@ -232,6 +232,34 @@ export function renderContextDocument(
 const FOREIGN_HEADER_RE =
 	/^\[\[CTX_TURN document=([0-9a-f]{64}) index=\d+ role=[A-Za-z][A-Za-z0-9_-]* id=([a-zA-Z0-9-]+) protected=(true|false)\]\]$/;
 
+/**
+ * Explicit opt-in for a headerless whole-context rewrite. A bare summary is not enough:
+ * the declaration must name the current revision and document nonce and give a reason.
+ */
+const REWRITE_DECL_RE =
+	/^\[\[CLM REWRITE revision=(\d+) document=([0-9a-f]{64}) reason=(.+?)\]\]$/;
+
+interface RewriteDeclaration {
+	revision: number;
+	documentId: string;
+	reason: string;
+}
+
+function parseRewriteDeclaration(text: string, snapshot: ContextDocumentSnapshot): RewriteDeclaration | undefined {
+	const declarations: RewriteDeclaration[] = [];
+	for (const line of text.split(/\r?\n/)) {
+		const match = REWRITE_DECL_RE.exec(line.trim());
+		if (!match) continue;
+		const reason = match[3].trim();
+		if (!reason) continue;
+		declarations.push({ revision: Number(match[1]), documentId: match[2], reason });
+	}
+	if (declarations.length !== 1) return undefined;
+	const declaration = declarations[0]!;
+	if (declaration.revision !== snapshot.revision || declaration.documentId !== snapshot.documentId) return undefined;
+	return declaration;
+}
+
 function parseDocument(text: string, snapshot: ContextDocumentSnapshot): ParsedDocument {
 	const metadata = META_RE.exec(text);
 	const blockRe = new RegExp(
@@ -322,15 +350,20 @@ function contentToolCalls(message: LiveContextMessage): Array<{ id?: string; nam
 		}));
 }
 
-function toolCallIds(message: LiveContextMessage): Set<string> {
-	const ids = new Set<string>();
-	for (const call of contentToolCalls(message)) if (call.id) ids.add(call.id);
+function toolCallIdCounts(message: LiveContextMessage): Map<string, number> {
+	const counts = new Map<string, number>();
+	const add = (id: string) => counts.set(id, (counts.get(id) ?? 0) + 1);
+	for (const call of contentToolCalls(message)) if (call.id) add(call.id);
 	for (const call of Array.isArray(message.tool_calls) ? message.tool_calls : []) {
 		if (call && typeof call === "object" && typeof (call as Record<string, unknown>).id === "string") {
-			ids.add(String((call as Record<string, unknown>).id));
+			add(String((call as Record<string, unknown>).id));
 		}
 	}
-	return ids;
+	return counts;
+}
+
+function toolCallIds(message: LiveContextMessage): Set<string> {
+	return new Set(toolCallIdCounts(message).keys());
 }
 
 /** Edited body text as it should enter a message: escaped structural lines restored. */
@@ -409,20 +442,22 @@ function repairToolGroupsWithProvenance(messages: LiveContextMessage[], provenan
 			.filter((part) => (part as Record<string, unknown>)?.type === "toolCall")
 			.map((part) => String((part as Record<string, unknown>).id ?? ""))
 			.filter((id) => id.length > 0);
+		const requiredCounts = new Map<string, number>();
+		for (const id of orderedIds) requiredCounts.set(id, (requiredCounts.get(id) ?? 0) + 1);
 
-		const resultIds = new Set<string>();
+		const resultCounts = new Map<string, number>();
 		let duplicateResult = false;
 		let cursor = index + 1;
 		while (cursor < repaired.length && repaired[cursor].role === "toolResult") {
 			const resultId = repaired[cursor].toolCallId;
 			if (typeof resultId === "string" && ids.has(resultId)) {
-				if (resultIds.has(resultId)) duplicateResult = true;
-				resultIds.add(resultId);
+				const count = resultCounts.get(resultId) ?? 0;
+				if (count > 0) duplicateResult = true;
+				resultCounts.set(resultId, count + 1);
 			}
 			cursor++;
 		}
-		const missing = orderedIds.filter((id) => !resultIds.has(id));
-		const complete = missing.length === 0 && !duplicateResult;
+		const complete = [...requiredCounts].every(([id, count]) => resultCounts.get(id) === count) && !duplicateResult;
 		if (complete) continue;
 
 
@@ -522,23 +557,25 @@ function repairToolGroupsWithProvenance(messages: LiveContextMessage[], provenan
 	for (let index = 0; index < repaired.length; index++) {
 		const message = repaired[index];
 		if (message.role !== "assistant") continue;
-		const ids = toolCallIds(message);
-		if (ids.size === 0) continue;
+		const requiredCounts = toolCallIdCounts(message);
+		if (requiredCounts.size === 0) continue;
 		let cursor = index + 1;
-		const found = new Set<string>();
+		const foundCounts = new Map<string, number>();
 		while (cursor < repaired.length && repaired[cursor].role === "toolResult") {
 			const resultId = repaired[cursor].toolCallId;
-			if (typeof resultId === "string" && ids.has(resultId)) found.add(resultId);
+			if (typeof resultId === "string" && requiredCounts.has(resultId)) {
+				foundCounts.set(resultId, (foundCounts.get(resultId) ?? 0) + 1);
+			}
 			cursor++;
 		}
-		if ([...ids].every((id) => found.has(id))) continue;
+		if ([...requiredCounts].every(([id, count]) => foundCounts.get(id) === count)) continue;
 		const tombstone: LiveContextMessage = {
 			role: "custom",
 			customType: "clm:terminal-duplicate-group",
 			content: [{ type: "text", text: "[pi-clm] Terminalized duplicate/incomplete tool-call group; no provider-valid call/result pair remains." }],
 			display: false,
 			timestamp: typeof message.timestamp === "number" ? message.timestamp : Date.now(),
-			details: { toolCallIds: [...ids], tombstone: true },
+			details: { toolCallIds: [...requiredCounts.keys()], tombstone: true },
 		};
 		const assistantOrigin = originOf[index];
 		dropAt(index, cursor - index);
@@ -554,16 +591,18 @@ export function hasOrphanToolMessages(messages: LiveContextMessage[]): boolean {
 	for (let index = 0; index < messages.length; index++) {
 		const message = messages[index];
 		if (message.role === "assistant") {
-			const ids = toolCallIds(message);
-			if (ids.size === 0) continue;
-			const found = new Set<string>();
+			const requiredCounts = toolCallIdCounts(message);
+			if (requiredCounts.size === 0) continue;
+			const foundCounts = new Map<string, number>();
 			let cursor = index + 1;
 			while (cursor < messages.length && messages[cursor].role === "toolResult") {
 				const resultId = messages[cursor].toolCallId;
-				if (typeof resultId === "string" && ids.has(resultId)) found.add(resultId);
+				if (typeof resultId === "string" && requiredCounts.has(resultId)) {
+					foundCounts.set(resultId, (foundCounts.get(resultId) ?? 0) + 1);
+				}
 				cursor++;
 			}
-			if ([...ids].some((id) => !found.has(id))) return true;
+			if ([...requiredCounts].some(([id, count]) => (foundCounts.get(id) ?? 0) !== count)) return true;
 		}
 		if (message.role === "toolResult") {
 			let cursor = index - 1;
@@ -723,19 +762,34 @@ export function applyContextDocument(
 		);
 	}
 
-	// CLM: a file with no header-shaped lines at all is the model replacing its whole
-	// context with free text (the paper's "collapse to a summary" move). Accept it as one
-	// notes block, but keep every owner (user) turn: a collapse may summarise everything the
-	// model has already seen, never the instructions the owner gave.
+	// CLM: a file with no header-shaped lines at all is a whole-context rewrite. A bare
+	// summary is not an implicit rewrite: the draft must explicitly opt in by naming the
+	// current revision/document and stating why localized trims cannot free enough room.
+	// The rewrite becomes one notes block, but every owner (user) turn is kept: a rewrite
+	// may summarise everything the model has already seen, never the owner's instructions.
 	if (options.editingMode === "clm" && parsed.blocks.length === 0 && editedText.trim().length > 0) {
+		const rewrite = parseRewriteDeclaration(editedText, snapshot);
+		if (!rewrite) {
+			return rejected(
+				snapshot,
+				beforeEstimate,
+				"Headerless context is a whole-context rewrite, but it has no valid explicit opt-in. " +
+					`Start the file with one line: [[CLM REWRITE revision=${snapshot.revision} document=${snapshot.documentId} reason=<why localized trims cannot free enough room>]]. ` +
+					"Without that declaration a headerless draft is not applied; tidy blocks in place and keep the [[CTX_TURN ...]] headers.",
+			);
+		}
 		const body = unescapeStructuralLines(
 			editedText
 				.split(/\r?\n/)
-				.filter((line) => !META_RE.test(`${line}\n`) && !line.trim().startsWith("# Edit bodies or delete editable CTX_TURN blocks."))
+				.filter((line) =>
+					!META_RE.test(`${line}\n`) &&
+					!line.trim().startsWith("# Edit bodies or delete editable CTX_TURN blocks.") &&
+					!REWRITE_DECL_RE.test(line.trim())
+				)
 				.join("\n")
 				.trim(),
 		);
-		if (body.length === 0) return rejected(snapshot, beforeEstimate, "Mirror is empty after removing metadata; nothing to apply.");
+		if (body.length === 0) return rejected(snapshot, beforeEstimate, "Mirror is empty after removing metadata and rewrite declaration; nothing to apply.");
 		const candidate: LiveContextMessage[] = [];
 		const candidateOrigins: Array<{ sourceIndex?: number; kind: ContextEditSourceKind | "added" }> = [];
 		const removedSourceIndexes = new Set<number>();
@@ -752,9 +806,9 @@ export function applyContextDocument(
 		candidate.push(contextNote(body, undefined, "notes"));
 		candidateOrigins.push({ kind: "added" });
 		return finalize(candidate, candidateOrigins, removedSourceIndexes, [
-			"Accepted a full rewrite: every block was replaced by one notes block" +
+			"Accepted a full rewrite (explicitly declared): every block was replaced by one notes block" +
 				(keptUserTurns > 0 ? ` after the ${keptUserTurns} owner turn(s)` : "") +
-				". To edit blocks individually, keep the [[CTX_TURN ...]] headers.",
+				`. Reason: ${rewrite.reason}. To edit blocks individually, keep the [[CTX_TURN ...]] headers.`,
 		]);
 	}
 	// With a stable document the baseline digest still changes every render (new raw
@@ -862,6 +916,16 @@ export function applyContextDocument(
 			if (options.editingMode === "clm" && sourceBlock.role === "user") droppedOwnerTurns.push(sourceBlock.index + 1);
 			removedSourceIndexes.add(sourceBlock.index);
 			continue;
+		}
+		if (sourceBlock.role === "user" && parsedBlock.role !== "user") {
+			// Changing an owner turn's role turns an instruction into a model-authored note.
+			return rejected(
+				snapshot,
+				beforeEstimate,
+				`Owner turn ${sourceBlock.index + 1} cannot be demoted to role=${parsedBlock.role}. ` +
+					"Keep role=user and edit only the body to retire an instruction.",
+				diagnostics,
+			);
 		}
 		if (
 			parsedBlock.body === sourceBlock.body &&

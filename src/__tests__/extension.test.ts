@@ -1785,3 +1785,65 @@ describe("pi-clm lease and durability boundaries", () => {
 		} finally { await emit(harness, "session_shutdown", {}); }
 	});
 });
+
+describe("CLM queue validation and lease fail-closed", () => {
+	test("CLM: /clm commit refuses a mirror that changed after draft acceptance", async () => {
+		const harness = createHarness();
+		liveContextExtension(harness.pi, { editingMode: "clm" });
+		await emit(harness, "session_start", { reason: "startup" });
+		try {
+			const raw = rawConversation();
+			await emit(harness, "context", { type: "context", messages: raw });
+			const before = await emit(harness, "before_agent_start", { systemPrompt: "base" });
+			const path = String(before[0].systemPrompt).match(/mirrored at `([^`]+)`/)![1];
+			await writeFile(path, compactSecondTurn(await readFile(path, "utf8")), "utf8");
+			await emit(harness, "turn_end", { type: "turn_end", message: {}, toolResults: [] });
+			// Change the accepted file before queueing it.
+			await writeFile(path, (await readFile(path, "utf8")).replace("Investigation complete: parser.ts is the only relevant file.", "later unaccepted edit"), "utf8");
+			await harness.commands.get("clm").handler("commit", harness.ctx);
+			assert.ok(harness.notifications.some((notice) => /mirror changed after its draft was accepted|commit is refused/.test(notice)));
+			const next = await emit(harness, "context", { type: "context", messages: raw });
+			assert.doesNotMatch(JSON.stringify(next[0].messages), /later unaccepted edit|Investigation complete/);
+		} finally {
+			await emit(harness, "session_shutdown", {});
+		}
+	});
+
+	test("CLM: a tree move during commit fails closed with the verified ledger and rewrites the mirror", async (t) => {
+		const harness = createHarness();
+		liveContextExtension(harness.pi, { editingMode: "clm" });
+		await emit(harness, "session_start", { reason: "startup" });
+		try {
+			const raw = rawConversation();
+			await emit(harness, "context", { type: "context", messages: raw });
+			const before = await emit(harness, "before_agent_start", { systemPrompt: "base" });
+			const path = String(before[0].systemPrompt).match(/mirrored at `([^`]+)`/)![1];
+			await writeFile(path, compactSecondTurn(await readFile(path, "utf8")), "utf8");
+			await emit(harness, "turn_end", { type: "turn_end", message: {}, toolResults: [] });
+			await harness.tools.get("live_context_commit").execute("commit-1", {}, undefined, undefined, harness.ctx);
+
+			const original = MirrorStore.prototype.write;
+			let finish!: () => void;
+			let first = true;
+			t.mock.method(MirrorStore.prototype, "write", async function (this: MirrorStore, content: string, expected?: number, beforePublish?: () => boolean) {
+				if (first) {
+					first = false;
+					return new Promise<void>((resolve) => { finish = resolve; });
+				}
+				return original.call(this, content, expected, beforePublish);
+			});
+			const pending = emit(harness, "context", { type: "context", messages: raw });
+			await emit(harness, "session_tree", {});
+			finish();
+			const pendingResult = await pending;
+			assert.match(JSON.stringify(pendingResult[0].messages), /ledger changed|lease changed/i);
+			const after = await emit(harness, "context", { type: "context", messages: raw });
+			assert.doesNotMatch(JSON.stringify(after[0].messages), /Investigation complete/);
+			const mirror = await readFile(path, "utf8");
+			assert.doesNotMatch(mirror, /Investigation complete/);
+			assert.match(mirror, /Old investigation/);
+		} finally {
+			await emit(harness, "session_shutdown", {});
+		}
+	});
+});

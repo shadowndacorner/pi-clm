@@ -126,7 +126,14 @@ import {
 const STATUS_KEY = "live-context";
 const NOTICE_TYPE = "live-context-notice";
 /** Conservative token allowance for notices emitted after a CLM commit. */
-const COMMIT_NOTICE_MARGIN_TOKENS = 512;
+const COMMIT_NOTICE_MARGIN_TOKENS = 256;
+/** Reserve for budget/overflow/continuity notices appended after the guard estimate. */
+const REQUEST_NOTICE_RESERVE_TOKENS = 512;
+
+/** Keep the notice reserve proportionate so a small budget is not entirely consumed by it. */
+function noticeReserveFor(limit: number): number {
+	return Math.min(REQUEST_NOTICE_RESERVE_TOKENS, Math.max(0, Math.floor(limit * 0.1)));
+}
 const CONTINUITY_MESSAGE_TYPE = "live-context-continuity";
 const EXTENSION_DIR = dirname(fileURLToPath(import.meta.url));
 
@@ -325,6 +332,11 @@ function policyDigest(): string {
 		leafId: string | null;
 		policyEpoch: number;
 		settingsDigest: string;
+		/** Store generation observed when the accepted edit was captured (CAS token). */
+		storeGeneration: number;
+		/** Digest of the model-edited file at acceptance, before the draft re-render. */
+		acceptedMirrorDigest: string;
+		/** Digest of the CLM-rendered snapshot published at the context boundary. */
 		renderedDigest?: string;
 	}
 	let pendingDraft: PendingDraft | undefined;
@@ -830,37 +842,48 @@ function verifyCustomEntry(ctx: ExtensionContext, expected: unknown): void {
 		return locked;
 	}
 
+	/** True only when the draft, store, session, lifecycle, policy and active revision still match. */
+	function draftLeaseValid(ctx: ExtensionContext, draft: PendingDraft, activeStore: MirrorStore): boolean {
+		return pendingDraft === draft &&
+			store === activeStore &&
+			state.enabled &&
+			lifecycleEpoch === draft.lifecycleEpoch &&
+			ctx.sessionManager.getSessionId() === draft.sessionId &&
+			(ctx.sessionManager.getLeafId() ?? null) === draft.leafId &&
+			policyEpoch === draft.policyEpoch &&
+			policyDigest() === draft.settingsDigest &&
+			draft.baseRevision === activeRevision();
+	}
+
 	/**
 	 * Activate a queued draft once, only at a verified context boundary. CLM active
 	 * state is memory-only: the durable checkpoint is not rewritten. The draft is
-	 * published to the mirror before runtime activation, so a failed publication
-	 * cannot leave a live projection that the visible mirror does not contain.
+	 * published to the mirror before runtime activation. Publication is predicated on
+	 * the draft's own store generation and lease, and the lease is rechecked before the
+	 * visible rename, so rejected/old-branch bytes never become visible.
 	 */
-	async function commitPendingDraft(ctx: ExtensionContext, rawMessages: LiveContextMessage[]): Promise<void> {
-		if (!pendingDraft || !pendingDraft.queued || quarantined !== undefined) return;
+	async function commitPendingDraft(ctx: ExtensionContext, rawMessages: LiveContextMessage[]): Promise<"none" | "committed" | "aborted"> {
+		if (!pendingDraft || !pendingDraft.queued || quarantined !== undefined) return "none";
 		const draft = pendingDraft;
-		const leaseMismatch =
-			draft.sessionId !== ctx.sessionManager.getSessionId() ||
-			draft.lifecycleEpoch !== lifecycleEpoch ||
-			draft.leafId !== (ctx.sessionManager.getLeafId() ?? null) ||
-			draft.policyEpoch !== policyEpoch ||
-			draft.settingsDigest !== policyDigest();
-		if (!state.enabled || draft.baseRevision !== activeRevision() || leaseMismatch) {
+		if (!store) {
+			pendingDraft = undefined;
+			queueOutcomeNotice("Queued draft was discarded because the mirror store is unavailable.");
+			return "aborted";
+		}
+		const activeStore = store;
+		if (!draftLeaseValid(ctx, draft, activeStore)) {
 			pendingDraft = undefined;
 			queueOutcomeNotice("Queued draft was discarded because its lease changed.");
-			return;
+			return "aborted";
 		}
 		const projected = applyProjection(rawMessages, draft.checkpoint);
 		if (!projected.valid) {
 			pendingDraft = undefined;
 			queueOutcomeNotice(`Queued draft was discarded: ${projected.reason}`);
-			return;
+			return "aborted";
 		}
-		if (!store) {
-			pendingDraft = undefined;
-			queueOutcomeNotice("Queued draft was discarded because the mirror store is unavailable.");
-			return;
-		}
+		// Learn from the provider's count of the previous request before estimating this one.
+		if (editingMode === "clm") calibrator.observe(lastProviderReportedTokens(rawMessages));
 		// Explicit CLM commit must fit the guard limit after the same cap/withhold/continuity
 		// pipeline that will build the next request, not just after repair.
 		const resolved = resolveBudget(budgetPolicy, ctx.model?.contextWindow);
@@ -877,7 +900,8 @@ function verifyCustomEntry(ctx: ExtensionContext, expected: unknown): void {
 					estimateTextTokens(pendingNotice ?? "") +
 					estimateTextTokens(commitNotice),
 				) +
-				COMMIT_NOTICE_MARGIN_TOKENS;
+				COMMIT_NOTICE_MARGIN_TOKENS +
+				noticeReserveFor(limit);
 			if (overflowGuard.mode === "withhold") {
 				const visibleSuffix = selectContextVisibleMessages(projected.suffix);
 				const guarded = applyOverflowGuard(mirrorMessages, {
@@ -895,7 +919,7 @@ function verifyCustomEntry(ctx: ExtensionContext, expected: unknown): void {
 			if (estimated > limit) {
 				pendingDraft = undefined;
 				queueOutcomeNotice(`Queued draft does not fit the guard limit (${estimated} > ${limit}); trim the mirror and commit again.`);
-				return;
+				return "aborted";
 			}
 		}
 		const snapshot = renderContextDocument(mirrorMessages, {
@@ -904,29 +928,19 @@ function verifyCustomEntry(ctx: ExtensionContext, expected: unknown): void {
 			lockedIndexes: lockedRepresentationIndexes(mirrorMessages),
 			documentSeed: `${ctx.sessionManager.getSessionId()}:${draft.checkpoint.sourceDigest}`,
 		});
-		const activeStore = store;
 		try {
-			await activeStore.write(snapshot.text);
+			await activeStore.write(snapshot.text, draft.storeGeneration, () => draftLeaseValid(ctx, draft, activeStore));
 		} catch (error) {
 			pendingDraft = undefined;
 			queueOutcomeNotice(`Queued draft publication failed: ${error instanceof Error ? error.message : String(error)}`);
-			return;
+			return "aborted";
 		}
-		// The await is a lease boundary: tree navigation, off/reset, or store replacement
-		// can happen while publication is in flight. Recheck before activating.
-		const leaseStillValid =
-			store === activeStore &&
-			state.enabled &&
-			lifecycleEpoch === draft.lifecycleEpoch &&
-			ctx.sessionManager.getSessionId() === draft.sessionId &&
-			(ctx.sessionManager.getLeafId() ?? null) === draft.leafId &&
-			policyEpoch === draft.policyEpoch &&
-			policyDigest() === draft.settingsDigest &&
-			draft.baseRevision === activeRevision();
-		if (!leaseStillValid) {
+		// The await is a lease boundary: tree navigation, off/reset, store replacement, or a
+		// newer draft can happen while publication is in flight. Recheck before activation.
+		if (!draftLeaseValid(ctx, draft, activeStore)) {
 			pendingDraft = undefined;
 			queueOutcomeNotice("Queued draft was discarded because its lease changed during publication.");
-			return;
+			return "aborted";
 		}
 		pendingDraft = undefined;
 		runtimeActive = {
@@ -942,6 +956,68 @@ function verifyCustomEntry(ctx: ExtensionContext, expected: unknown): void {
 		awaitObservationForRevision = draft.generation;
 		lastBudgetReading = undefined;
 		queueOutcomeNotice(`Committed revision ${draft.generation} at the next context boundary.${draft.shape ? ` ${draft.shape}` : ""}`);
+		return "committed";
+	}
+
+	/** One queue-validation path for both the tool and `/clm commit`. */
+	async function queuePendingDraft(): Promise<{ ok: boolean; message: string; details: Record<string, unknown> }> {
+		if (!state.enabled) return { ok: false, message: "CLM is off; there is no live context to commit.", details: { queued: false } };
+		if (!pendingDraft) return { ok: false, message: "No accepted draft is pending; edit the mirror first.", details: { queued: false } };
+		if (pendingDraft.baseRevision !== activeRevision()) {
+			pendingDraft = undefined;
+			return { ok: false, message: "The draft's base revision changed; edit and commit again.", details: { queued: false } };
+		}
+		if (!store) return { ok: false, message: "The mirror store is unavailable; commit is refused.", details: { queued: false } };
+		const expectedDigest = pendingDraft.renderedDigest ?? pendingDraft.acceptedMirrorDigest;
+		const current = await store.read();
+		if (current === undefined || textDigest(current) !== expectedDigest) {
+			return {
+				ok: false,
+				message: "The mirror changed after its draft was accepted; commit is refused until the edit is accepted on a later turn.",
+				details: { queued: false },
+			};
+		}
+		if (pendingDraft.queued) {
+			return { ok: true, message: `Draft revision ${pendingDraft.generation} is already queued.`, details: { queued: true, generation: pendingDraft.generation, baseRevision: pendingDraft.baseRevision } };
+		}
+		pendingDraft.queued = true;
+		return { ok: true, message: `Draft revision ${pendingDraft.generation} is queued for the next verified context boundary.`, details: { queued: true, generation: pendingDraft.generation, baseRevision: pendingDraft.baseRevision } };
+	}
+
+	/** Fail closed to the verified ledger after a stale tree/ledger or aborted lease. */
+	async function failClosedContext(ctx: ExtensionContext, message: string): Promise<{ messages: AgentMessage[] }> {
+		pendingDraft = undefined;
+		runtimeActive = undefined;
+		turnBaseline = undefined;
+		lastBudgetReading = undefined;
+		currentContextView = undefined;
+		const reset = resetProjectionState(state, message);
+		persistDurable(reset, ctx);
+		queueOutcomeNotice(message);
+		ctx.ui.notify(`pi-clm: ${message}`, "error");
+		const ledger = ledgerMessages(ctx);
+		const mirrorMessages = ledger ? selectContextVisibleMessages(ledger) : [];
+		if (store) {
+			try {
+				const snapshot = renderContextDocument(mirrorMessages, {
+					revision: activeRevision(),
+					protectedIndexes: new Set<number>(),
+					lockedIndexes: lockedRepresentationIndexes(mirrorMessages),
+					documentSeed: `${ctx.sessionManager.getSessionId()}:raw`,
+				});
+				await store.write(snapshot.text);
+			} catch (error) {
+				queueOutcomeNotice(`Mirror refresh failed: ${error instanceof Error ? error.message : String(error)}`);
+			}
+		}
+		const safe = [...mirrorMessages, {
+			role: "custom",
+			customType: NOTICE_TYPE,
+			content: message,
+			display: false,
+			timestamp: Date.now(),
+		}];
+		return { messages: asAgentMessages(safe) };
 	}
 
 	async function replaceStore(ctx: ExtensionContext): Promise<void> {
@@ -1399,33 +1475,10 @@ function verifyCustomEntry(ctx: ExtensionContext, expected: unknown): void {
 		],
 		parameters: CommitParameters,
 		async execute(_toolCallId, _params, _signal, _onUpdate, _ctx) {
-			if (!state.enabled) throw new Error("CLM is off; there is no live context to commit.");
-			if (!pendingDraft) {
-				return {
-					content: [{ type: "text", text: "No accepted draft is pending; edit the mirror first." }],
-					details: { queued: false },
-				};
-			}
-			if (pendingDraft.baseRevision !== activeRevision()) {
-				pendingDraft = undefined;
-				throw new Error("The draft's base revision changed; edit and commit again.");
-			}
-			if (pendingDraft.renderedDigest !== undefined && store) {
-				const current = await store.read();
-				if (current === undefined || textDigest(current) !== pendingDraft.renderedDigest) {
-					throw new Error("The mirror changed after its draft was rendered; commit is refused until the edit is accepted on a later turn.");
-				}
-			}
-			if (pendingDraft.queued) {
-				return {
-					content: [{ type: "text", text: `Draft revision ${pendingDraft.generation} is already queued.` }],
-					details: { queued: true, generation: pendingDraft.generation, baseRevision: pendingDraft.baseRevision },
-				};
-			}
-			pendingDraft.queued = true;
+			const queued = await queuePendingDraft();
 			return {
-				content: [{ type: "text", text: `Draft revision ${pendingDraft.generation} is queued for the next verified context boundary.` }],
-				details: { queued: true, generation: pendingDraft.generation, baseRevision: pendingDraft.baseRevision },
+				content: [{ type: "text", text: queued.message }],
+				details: queued.details,
 			};
 		},
 	});
@@ -1735,14 +1788,10 @@ function verifyCustomEntry(ctx: ExtensionContext, expected: unknown): void {
 				return;
 			case "commit":
 				if (editingMode !== "clm") { ctx.ui.notify("Commit is CLM mode only.", "warning"); return; }
-				if (!pendingDraft) { ctx.ui.notify("No accepted draft is pending; edit the mirror first.", "warning"); return; }
-				if (pendingDraft.baseRevision !== activeRevision()) {
-					pendingDraft = undefined;
-					ctx.ui.notify("The draft's base revision changed; edit and commit again.", "warning");
-					return;
+				{
+					const queued = await queuePendingDraft();
+					ctx.ui.notify(queued.message, queued.ok ? "info" : "warning");
 				}
-				pendingDraft.queued = true;
-				ctx.ui.notify(`Draft revision ${pendingDraft.generation} is queued for the next verified context boundary.`, "info");
 				return;
 			default:
 				break;
@@ -1828,22 +1877,9 @@ function verifyCustomEntry(ctx: ExtensionContext, expected: unknown): void {
 			lastBudgetReading = undefined;
 			currentContextView = undefined;
 			const message = "Raw event messages do not match the verified session ledger; provenance is unknown, so unverified origins were withheld and the staged commit was discarded.";
-			const reset = resetProjectionState(state, message);
-			persistDurable(reset, ctx);
-			queueOutcomeNotice(message);
-			ctx.ui.notify(`pi-clm: ${message}`, "error");
 			// Use only the verified ledger. No role-based filter is safe: an upstream rewrite
 			// can promote a tool result into user/assistant/custom content.
-			const ledger = ledgerMessages(ctx);
-			const safe = ledger ? selectContextVisibleMessages(ledger) : [];
-			safe.push({
-				role: "custom",
-				customType: NOTICE_TYPE,
-				content: message,
-				display: false,
-				timestamp: Date.now(),
-			});
-			return { messages: asAgentMessages(safe) };
+			return await failClosedContext(ctx, message);
 		}
 
 		if (quarantined !== undefined) {
@@ -1868,7 +1904,15 @@ function verifyCustomEntry(ctx: ExtensionContext, expected: unknown): void {
 		}
 
 		// Activate any accepted draft at this verified context boundary before rendering.
-		await commitPendingDraft(ctx, rawMessages);
+		const commitResult = await commitPendingDraft(ctx, rawMessages);
+		// The await is a lease boundary. If tree navigation or store replacement changed the
+		// verified ledger, do not continue with the pre-await raw event messages.
+		if (!rawLedgerMatches(ctx, rawMessages)) {
+			return await failClosedContext(
+				ctx,
+				`The verified session ledger changed during draft ${commitResult === "committed" ? "publication" : "commit"}; the pre-await context was discarded.`,
+			);
+		}
 
 		let effectiveMessages = rawMessages;
 		let suffixMessages: LiveContextMessage[] = [];
@@ -2027,7 +2071,7 @@ function verifyCustomEntry(ctx: ExtensionContext, expected: unknown): void {
 				const limit = overflowGuardLimit(resolved.budget, resolved.reserve, ctx.model?.contextWindow);
 				const fixedTokens = calibrator.apply(
 					estimateTextTokens(ctx.getSystemPrompt?.() ?? "") + (pendingNotice ? estimateTextTokens(pendingNotice) : 0),
-				);
+				) + noticeReserveFor(limit);
 				const guarded = applyOverflowGuard(effectiveMessages, {
 					limit,
 					fixedTokens,
@@ -2329,6 +2373,8 @@ function verifyCustomEntry(ctx: ExtensionContext, expected: unknown): void {
 				leafId: ctx.sessionManager.getLeafId() ?? null,
 				policyEpoch,
 				settingsDigest: policyDigest(),
+				storeGeneration: activeStore.currentGeneration(),
+				acceptedMirrorDigest: textDigest(editedText),
 			};
 			if (replacedQueued) queueOutcomeNotice("The queued draft was replaced by a newer draft; commit again.");
 		} else {

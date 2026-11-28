@@ -20,6 +20,7 @@ import os
 import re
 import sys
 import tempfile
+from collections import Counter
 
 META_RE = re.compile(
     r"^\[\[LIVE_CONTEXT version=(\d+) revision=(\d+) document=([0-9a-f]{64}) baseline=([0-9a-f]{64})\]\]$"
@@ -87,7 +88,8 @@ def load(text: str) -> tuple[str, str, dict, list[Block]]:
         if current is not None:
             current.body_lines.append(line)
     ids = [block.id for block in blocks]
-    duplicates = sorted({block_id for block_id in ids if ids.count(block_id) > 1})
+    counts = Counter(ids)
+    duplicates = sorted(block_id for block_id, count in counts.items() if count > 1)
     if duplicates:
         raise MirrorError(f"duplicate block ids in the mirror: {', '.join(duplicates)}")
     preamble = "\n".join(lines[1:]).split("[[CTX_TURN document=")[0].rstrip("\n") if len(lines) > 1 else ""

@@ -77,9 +77,33 @@ describe("MirrorStore generation CAS", () => {
 	test("a losing writer cannot publish rejected bytes", async () => {
 		await withParent(async (parent) => {
 			const store = await MirrorStore.create("session", parent);
-			await store.write("accepted", 1);
-			await assert.rejects(store.write("rejected", 1), /Stale mirror generation/);
+			await store.write("accepted");
+			await assert.rejects(store.write("rejected", 0), /Stale mirror generation/);
 			assert.equal(await store.read(), "accepted");
+		});
+	});
+});
+
+describe("MirrorStore explicit CAS", () => {
+	test("an explicit CAS token accepts only the current generation", async () => {
+		await withParent(async (parent) => {
+			const store = await MirrorStore.create("session", parent);
+			await store.write("one");
+			await store.write("two", store.currentGeneration());
+			await assert.rejects(store.write("stale", 1), /Stale mirror generation/);
+			assert.equal(await store.read(), "two");
+		});
+	});
+
+	test("beforePublish rejection leaves the previous visible bytes intact", async () => {
+		await withParent(async (parent) => {
+			const store = await MirrorStore.create("session", parent);
+			await store.write("old bytes");
+			await assert.rejects(
+				store.write("new bytes", store.currentGeneration(), () => false),
+				/lease changed/,
+			);
+			assert.equal(await store.read(), "old bytes");
 		});
 	});
 });

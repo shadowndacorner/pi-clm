@@ -33,9 +33,11 @@ How to edit
   existing blocks come only from the current headers. Update the note in place afterwards
   instead of appending new copies.
 - Replace everything only as a last resort: deleting all headers and writing free text makes one
-  notes block after your owner turns. It flattens the structure you will want later, and every
-  later tidy then imitates that shape. Never leave old headers in a rewrite — that is rejected as
-  a stale draft.
+  notes block after your owner turns. It is accepted only with an explicit declaration naming the
+  current revision/document and a reason, e.g. `[[CLM REWRITE revision=7 document=<nonce> reason=<capacity pressure>]]`.
+  A bare summary is rejected, because it turns CLM into ordinary compaction. A rewrite flattens the
+  structure you will want later, and every later tidy then imitates that shape. Never leave old
+  headers in a rewrite — that is rejected as a stale draft.
 - Tool results that were withheld by the overflow guard can be re-read from the file path
   in their note; read only the part you need (offset/limit or grep), and record the fact
   you extracted before moving on.

@@ -83,11 +83,19 @@ If a body carries source text you may need later, call `live_context_annotate` o
 first (`pin`, `continuity`, or `archive`), then trim the body. Resolve the annotation once its
 future action is done.
 
-## The exception: a full rewrite
+## The exception: a declared full rewrite
 
-A full rewrite means deleting every `[[CTX_TURN ...]]` header and writing free text; it becomes one
-notes block after your owner turns. Reach for it only when localized trims cannot free enough room
-for the next request, and write the reason into the notes block. It flattens the structure you will
-want later — every surviving block becomes a summary, and the next turn imitates that shape. A
-draft that still carries headers from an earlier revision is rejected as stale: never leave old
-headers behind, and re-read line 1 plus the headers immediately before writing.
+A full rewrite means deleting every `[[CTX_TURN ...]]` header and writing free text. It is accepted
+only when the draft explicitly opts in and gives a reason. Put this line at the top:
+
+```text
+[[CLM REWRITE revision=7 document=<the document nonce from line 1> reason=<why localized trims cannot free enough room>]]
+```
+
+Then write the free text. It becomes one notes block after your owner turns. A bare summary without
+that declaration is rejected: plain summarisation would quietly turn CLM into ordinary compaction.
+Reach for a rewrite only when localized trims cannot free enough room for the next request; it
+flattens the structure you will want later — every surviving block becomes a summary, and the next
+turn imitates that shape. A draft that still carries headers from an earlier revision is rejected
+as stale: never leave old headers behind, and re-read line 1 plus the headers immediately before
+writing.

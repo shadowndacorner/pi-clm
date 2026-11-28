@@ -23,9 +23,11 @@ During its turn the model may rewrite that file however it likes — the intende
 **tidy pass**: shorten spent tool output and superseded work *where it sits*, keep every header
 you retain, batch those localized patches into one write. It may also delete or reorder blocks,
 insert new ones (`id=new-…`, any role label) or grow a scratchpad. Replacing everything with
-plain text stays available but is the exception: it becomes one `notes` block, every owner turn
-survives, and a draft that still carries old headers is rejected as stale rather than taken for
-a rewrite. `scripts/clm-tidy.py` (in the `clm-live-context` skill) applies checked patches and
+plain text stays available but is the declared exception: it requires a
+`[[CLM REWRITE revision=<current> document=<nonce> reason=<capacity pressure>]]` line, becomes
+one `notes` block, and keeps every owner turn. A bare summary or a draft that still carries old
+headers is rejected rather than taken for a rewrite. `scripts/clm-tidy.py` (in the
+`clm-live-context` skill) applies checked patches and
 refuses the common accidents. At the end of the turn pi-clm validates the file, keeps
 untouched messages as their original objects, repairs tool-call pairs, saves the result as
 a revision on the current branch, and uses it for the next request. Nothing shrinks

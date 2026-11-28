@@ -157,7 +157,10 @@ export function applyOverflowGuard(messages: LiveContextMessage[], options: Appl
 		output[index] = note;
 		withheld.push(record);
 		current = output;
-		estimated = options.fixedTokens + options.estimate(current);
+		// Incremental estimate: replace one source body with one note, rather than
+		// re-estimating the whole message array for every withheld result.
+		const noteTokens = options.estimate([note]);
+		estimated += noteTokens - tokens;
 		if (estimated <= options.limit) break;
 	}
 	return { messages: current, withheld, estimated };
@@ -166,9 +169,14 @@ export function applyOverflowGuard(messages: LiveContextMessage[], options: Appl
 export function overflowNoticeText(result: OverflowGuardResult, limit: number): string {
 	const count = result.withheld.length;
 	const files = result.withheld.filter((record) => record.file).length;
-	const list = result.withheld
+	// Bound the notice: a large parallel tool turn must not turn the summary itself into
+	// an unbounded new context cost.
+	const MAX_NOTICE_RECORDS = 10;
+	const shown = result.withheld.slice(0, MAX_NOTICE_RECORDS);
+	const omitted = count - shown.length;
+	const list = shown
 		.map((record) => `${record.toolName}#${record.toolCallId} (~${record.tokens.toLocaleString("en-US")} tok)`)
-		.join(", ");
+		.join(", ") + (omitted > 0 ? `, and ${omitted} more` : "");
 	const fits = result.estimated <= limit;
 	return (
 		`[CLM BUDGET] Overflow guard: the request would have exceeded the limit of ${limit.toLocaleString("en-US")} tokens, so ${count} tool result${count === 1 ? "" : "s"} ` +

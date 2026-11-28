@@ -121,11 +121,13 @@ Three more rules keep an accident from being read as an intention:
   document does not recognise (an older nonce, a malformed header) and none of its own is
   rejected as stale, with the expected revision named. Before this rule such a draft fell into
   the rewrite path below and deleted the whole context.
-- **A whole-context rewrite keeps every owner turn.** A file with no header-shaped lines at all
-  (CLM mode) becomes one `notes` block; every user turn survives verbatim, so a collapse can
-  summarise only what the model has already seen.
-- **Owner turns cannot be deleted.** A headed draft that removes a user block is rejected; its
-  body remains editable.
+- **A whole-context rewrite is explicitly declared.** A file with no header-shaped lines at all
+  (CLM mode) is accepted only when it starts with `[[CLM REWRITE revision=<current>
+  document=<current nonce> reason=<why localized trims cannot free enough room>]]`; the result
+  is one `notes` block and every user turn survives verbatim. A bare summary is rejected so CLM
+  cannot silently become ordinary compaction.
+- **Owner turns cannot be deleted or demoted.** A headed draft that removes a user block is
+  rejected, and changing its role away from `user` is rejected; its body remains editable.
 
 The edit trace indexes the **repaired** projection: `outputIndex` addresses the messages that
 will actually be sent, so group repair can neither shift an index nor leave a checkpoint

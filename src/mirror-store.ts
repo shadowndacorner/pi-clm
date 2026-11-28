@@ -64,23 +64,38 @@ export class MirrorStore {
 
 	private publicationChain: Promise<void> = Promise.resolve();
 
-	async write(content: string, generation = this.generation + 1): Promise<void> {
-		// Serialize publications. Check the generation inside the lock and preserve
+	/**
+	 * Publish a snapshot atomically. An explicit expectedGeneration is a CAS token: it
+	 * must equal the store generation when the serialized publication lock is acquired.
+	 * Default writers use the generation current at lock time, so two ordinary refreshes
+	 * serialize instead of spuriously rejecting one another.
+	 * `beforePublish` runs after the temp file is written and before the visible rename;
+	 * a lease/tree check there prevents rejected bytes from becoming visible.
+	 */
+	async write(
+		content: string,
+		expectedGeneration?: number,
+		beforePublish?: () => boolean,
+	): Promise<void> {
+		// Serialize publications. Check generation inside the lock and preserve
 		// permissions on the temp file so a losing writer cannot rename rejected bytes.
 		const run = this.publicationChain.then(async () => {
 			if (this.disposed) throw new Error("Mirror store has been disposed.");
-			const previousGeneration = this.generation;
-			if (generation <= previousGeneration) {
+			const expected = expectedGeneration ?? this.generation;
+			if (expectedGeneration !== undefined && expectedGeneration !== this.generation) {
 				throw new Error("Stale mirror generation: a newer snapshot already exists.");
 			}
 			const temporaryPath = join(this.directory, `.${basename(this.filePath)}.${randomUUID()}.tmp`);
 			try {
 				await writeFile(temporaryPath, content, { encoding: "utf8", mode: 0o600, flag: "wx" });
-				if (this.generation !== previousGeneration) {
+				if (this.generation !== expected) {
 					throw new Error("Mirror generation changed before publication.");
 				}
-				await rename(temporaryPath, this.filePath);
-				this.generation = generation;
+				if (beforePublish && !beforePublish()) {
+					throw new Error("Mirror publication lease changed before rename.");
+				}
+			await rename(temporaryPath, this.filePath);
+				this.generation = expected + 1;
 			} catch (error) {
 				await rm(temporaryPath, { force: true }).catch(() => undefined);
 				throw error;

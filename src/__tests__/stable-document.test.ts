@@ -86,7 +86,8 @@ describe("stable document nonce (CLM mode)", () => {
 		];
 		const snapshot = renderContextDocument(withTool, { revision: 0, protectedIndexes: new Set(), documentSeed: "s" });
 		const summary = "# Context Summary\n## Found so far\n- f01: SECRET=42\n<!-- Budget: 20000/20000 -->";
-		const result = applyContextDocument(summary, snapshot, clm);
+		const rewrite = `[[CLM REWRITE revision=0 document=${snapshot.documentId} reason=localized trims cannot free enough room]]\n${summary}`;
+		const result = applyContextDocument(rewrite, snapshot, clm);
 		assert.equal(result.accepted, true);
 		assert.equal(result.messages.length, 3, "the collapse keeps every owner turn and adds one notes block");
 		assert.equal(result.messages[0], withTool[0], "task statement kept verbatim");
@@ -96,8 +97,16 @@ describe("stable document nonce (CLM mode)", () => {
 		assert.match(result.diagnostics.join(" "), /Accepted a full rewrite/);
 		assert.deepEqual(result.editTrace?.sources.filter((s) => s.kind === "removed").map((s) => s.sourceIndex), [1, 2]);
 		// A pasted metadata line on top of free text is fine too (it is stripped).
-		const withMeta = `${snapshot.text.split("\n")[0]}\n\n${summary}`;
+		const withMeta = `${snapshot.text.split("\n")[0]}\n\n${rewrite}`;
 		assert.equal(applyContextDocument(withMeta, snapshot, clm).accepted, true);
+		// A bare summary is not an implicit rewrite.
+		const bare = applyContextDocument(summary, snapshot, clm);
+		assert.equal(bare.accepted, false);
+		assert.match(bare.reason ?? "", /explicit opt-in|CLM REWRITE/i);
+		// Stale/incomplete declaration is rejected.
+		const stale = `[[CLM REWRITE revision=0 document=${snapshot.documentId} reason=no]]\n${summary}`;
+		const staleResult = applyContextDocument(stale, { ...snapshot, revision: 1 }, clm);
+		assert.equal(staleResult.accepted, false);
 		// Conservative mode still rejects.
 		const conservative = renderContextDocument(withTool, { revision: 0 });
 		assert.equal(applyContextDocument(summary, conservative, {}).accepted, false);
