@@ -421,14 +421,43 @@ function repairToolGroupsWithProvenance(messages: LiveContextMessage[], provenan
 			&& (message.content as Array<Record<string, unknown>>).some(
 				(part: Record<string, unknown>) => part.type === "text" && typeof part.text === "string",
 			);
+		const assistantOrigin = originOf[index];
 		if (!hasText) {
-			// Deleted side, no prose to preserve: drop the group; that matches the
-			// model's deletion intent and keeps the remaining structure valid.
+			// A pure tool-call group with a missing side cannot be sent as a valid pair.
+			// Replace the whole group with a static CLM-authored tombstone note (no call
+			// arguments or result bodies); this keeps the consumed range represented.
+			const tombstone: LiveContextMessage = {
+				role: "custom",
+				customType: "clm:terminal-incomplete",
+				content: [{ type: "text", text: "[pi-clm] Terminalized incomplete tool-call group; no provider-valid call/result pair remains." }],
+				display: false,
+				timestamp: typeof message.timestamp === "number" ? message.timestamp : Date.now(),
+				details: { toolCallIds: orderedIds, tombstone: true },
+			};
 			dropAt(index, cursor - index);
+			repaired.splice(index, 0, tombstone);
+			originOf.splice(index, 0, assistantOrigin);
 			index -= 1;
 			continue;
 		}
-		repaired[index] = contextNote(renderMessage(message), message);
+		// Keep the assistant's prose, but remove unresolved tool-call fields so the
+		// result block is not left orphaned and call arguments are not serialized.
+		const proseParts = Array.isArray(message.content)
+			? message.content.filter((part) => {
+				const type = (part as Record<string, unknown> | undefined)?.type;
+				return type !== "toolCall";
+			})
+			: message.content;
+		const prose: LiveContextMessage = {
+			...message,
+			content: proseParts,
+			stopReason: "stop",
+		};
+		delete (prose as { tool_calls?: unknown }).tool_calls;
+		dropAt(index, cursor - index);
+		repaired.splice(index, 0, prose);
+		originOf.splice(index, 0, assistantOrigin);
+		index -= 1;
 	}
 
 	for (let index = 0; index < repaired.length; index++) {
@@ -543,7 +572,12 @@ export function applyContextDocument(
 			const candidateIndex = repaired.provenance[outputIndex];
 			const origin = candidateOrigins[candidateIndex];
 			if (!origin || origin.sourceIndex === undefined) return [];
-			const wasNormalized = canonicalMessage(candidate[candidateIndex]) !== canonicalMessage(messages[outputIndex]);
+			const outputMessage = messages[outputIndex];
+			if (outputMessage?.role === "custom" && outputMessage.customType === "clm:terminal-incomplete") {
+				// The original assistant/source is explicitly removed; the tombstone is an addition.
+				return [{ sourceIndex: origin.sourceIndex, kind: "removed" as ContextEditSourceKind }];
+			}
+			const wasNormalized = canonicalMessage(candidate[candidateIndex]) !== canonicalMessage(outputMessage);
 			const kind: ContextEditSourceKind = wasNormalized
 				? "normalized"
 				: origin.kind === "added" ? "edited" : origin.kind;
@@ -569,6 +603,10 @@ export function applyContextDocument(
 			sources: tracedSources,
 			additions: repaired.provenance.flatMap((candidateIndex, outputIndex) => {
 				const origin = candidateOrigins[candidateIndex];
+				const outputMessage = messages[outputIndex];
+				if (outputMessage?.role === "custom" && outputMessage.customType === "clm:terminal-incomplete") {
+					return [{ outputIndex, kind: "added" as const }];
+				}
 				return origin && origin.sourceIndex === undefined ? [{ outputIndex, kind: "added" as const }] : [];
 			}),
 		};

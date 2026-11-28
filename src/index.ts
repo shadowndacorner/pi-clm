@@ -4,9 +4,11 @@ import { fileURLToPath } from "node:url";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { StringEnum } from "@earendil-works/pi-ai";
 import {
+	buildContextEntries,
 	buildSessionContext,
 	calculateContextTokens,
 	estimateTokens,
+	sessionEntryToContextMessages,
 	type ExtensionAPI,
 	type ExtensionCommandContext,
 	type ExtensionContext,
@@ -237,6 +239,7 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 	const editingMode = options.editingMode ?? "conservative";
 	const commandName = editingMode === "clm" ? "clm" : "live-context";
 	let state = initialLiveContextState();
+	let quarantined: string | undefined;
 	let store: MirrorStore | undefined;
 	let turnBaseline: TurnBaseline | undefined;
 	let lifecycleEpoch = 0;
@@ -296,8 +299,22 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 		checkpoint: ProjectionCheckpoint;
 		createdAt: string;
 		shape?: string;
+		queued: boolean;
 	}
 	let pendingDraft: PendingDraft | undefined;
+	interface RuntimeActive {
+		revision: number;
+		checkpoint: ProjectionCheckpoint;
+		activatedAt: string;
+	}
+	/** CLM v1 active state is memory-only; durable checkpoint history remains in `state`. */
+	let runtimeActive: RuntimeActive | undefined;
+	function activeRevision(): number {
+		return runtimeActive?.revision ?? state.revision;
+	}
+	function activeCheckpoint(): ProjectionCheckpoint | undefined {
+		return runtimeActive?.checkpoint ?? state.checkpoint;
+	}
 	if (editingMode === "clm") activateSettings(stageSettings(baseSettings, { strictSteering: false }));
 
 	/** A resolved configuration, ready to activate. */
@@ -416,6 +433,7 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 		const staged = stageSettings(applyOverrides(baseSettings, nextOverrides), { strictSteering: true });
 		persistSettings(nextOverrides);
 		activateSettings(staged);
+		pendingDraft = undefined;
 		settingsOverrides = nextOverrides;
 		settingsWarning = undefined; // the saved entry is now well-formed
 		updateStatus(ctx);
@@ -426,6 +444,7 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 		const staged = stageSettings(applyOverrides(baseSettings, {}), { strictSteering: false });
 		persistSettings({});
 		activateSettings(staged);
+		pendingDraft = undefined;
 		settingsOverrides = {};
 		settingsWarning = undefined;
 		updateStatus(ctx);
@@ -461,8 +480,8 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 		// session: the provider's count of the last request, and a rebuilt snapshot.
 		const snapshot = measured ? currentContextView! : contextSnapshot(ctx);
 		const sessionObserved = reading || replaced ? undefined : lastProviderReportedTokens(snapshot.rawMessages ?? []);
-		const sessionObservedStale = sessionObserved !== undefined && state.checkpoint !== undefined &&
-			sessionObserved.index < state.checkpoint.sourceMessageCount;
+		const sessionObservedStale = sessionObserved !== undefined && activeCheckpoint() !== undefined &&
+			sessionObserved.index < activeCheckpoint()!.sourceMessageCount;
 		return {
 			// Without a reading for the current budget (e.g. just after a settings change), estimate
 			// the next request from the context snapshot the same way the reading does.
@@ -477,11 +496,11 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 
 	/** Footer: `clm 346k / 1.0m · r2` (calibrated estimate of the next request against the budget). */
 	function clmFooterText(ctx: ExtensionContext): string {
-		if (!state.enabled) return `clm off · r${state.revision}`;
+		if (!state.enabled) return `clm off · r${activeRevision()}`;
 		const { next, observed, budget } = sizeFigures(ctx);
 		const shown = next ?? observed;
 		const size = shown === undefined ? "" : ` ${formatTokens(shown)}${budget ? ` / ${formatTokens(budget)}` : ""}`;
-		return `clm${size} · r${state.revision}`;
+		return `clm${size} · r${activeRevision()}`;
 	}
 
 	function settingsSummary(ctx: ExtensionContext): string {
@@ -511,8 +530,8 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 				? `last request ${formatTokens(observed)}${of(observed)}, provider count`
 				: `${budget ? `budget ${formatTokens(budget)} · ` : ""}no request measured yet`;
 		const head = !state.enabled
-			? `CLM off · r${state.revision} · the model sees the raw transcript (/clm on)`
-			: `CLM on · r${state.revision} · ${size}`;
+			? `CLM off · r${activeRevision()} · the model sees the raw transcript (/clm on)`
+			: `CLM on · r${activeRevision()} · ${size}`;
 		const saved = raw && sent !== undefined && raw > sent ? ` (−${Math.round(((raw - sent) / raw) * 100)}%)` : "";
 		const outcome = state.lastOutcome
 			? ` · last ${state.lastOutcome.kind === "applied" ? "edit" : state.lastOutcome.kind} ${new Date(state.lastOutcome.at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`
@@ -623,6 +642,7 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 			lifecycleEpoch++;
 			turnBaseline = undefined;
 			pendingDraft = undefined;
+			runtimeActive = undefined;
 			currentContextView = undefined;
 		}
 		updateStatus(ctx);
@@ -638,13 +658,13 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 	/** Record the provider-reported size of the first request served by a new revision. */
 	function captureObservedUsage(ctx: ExtensionContext): void {
 		if (awaitObservationForRevision === undefined) return;
-		if (awaitObservationForRevision !== state.revision) {
+		if (awaitObservationForRevision !== activeRevision()) {
 			awaitObservationForRevision = undefined;
 			return;
 		}
 		const usage = ctx.getContextUsage?.();
 		if (!usage || usage.tokens === null || usage.percent === null) return;
-		observedUsage = { revision: state.revision, tokens: usage.tokens, percent: usage.percent };
+		observedUsage = { revision: activeRevision(), tokens: usage.tokens, percent: usage.percent };
 		awaitObservationForRevision = undefined;
 		updateStatus(ctx);
 	}
@@ -669,37 +689,33 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 		state = nextState;
 	}
 
-	/** Activate an accepted draft only at the next verified context boundary. */
-	function commitPendingDraft(ctx: ExtensionContext): void {
-		if (!pendingDraft) return;
+	/**
+	 * Activate a queued draft once, only at a verified context boundary. CLM active
+	 * state is memory-only: the durable checkpoint is not rewritten by this operation.
+	 */
+	function commitPendingDraft(ctx: ExtensionContext, rawMessages: LiveContextMessage[]): void {
+		if (!pendingDraft || !pendingDraft.queued || quarantined !== undefined) return;
 		const draft = pendingDraft;
-		pendingDraft = undefined;
-		if (!state.enabled || draft.baseRevision !== state.revision) {
+		if (!state.enabled || draft.baseRevision !== activeRevision()) {
+			pendingDraft = undefined;
 			queueOutcomeNotice("Queued draft was discarded because the active revision changed.");
 			return;
 		}
-		const message = `Committed revision ${draft.generation} at the next context boundary.${draft.shape ? ` ${draft.shape}` : ""}`;
-		try {
-			persist({
-				version: 1,
-				enabled: state.enabled,
-				revision: draft.generation,
-				checkpoint: draft.checkpoint,
-				lastOutcome: {
-					kind: "applied",
-					message,
-					beforeEstimate: draft.checkpoint.beforeEstimate,
-					afterEstimate: draft.checkpoint.afterEstimate,
-					estimateUnit: "tokens",
-					at: draft.createdAt,
-				},
-			});
-			awaitObservationForRevision = draft.generation;
-			queueOutcomeNotice(message);
-		} catch {
-			queueOutcomeNotice("Queued draft was not activated because checkpoint persistence failed. Previous context remains active.");
-			ctx.ui.notify("Live-context checkpoint persistence failed; previous revision retained.", "error");
+		const projected = applyProjection(rawMessages, draft.checkpoint);
+		if (!projected.valid) {
+			pendingDraft = undefined;
+			queueOutcomeNotice(`Queued draft was discarded: ${projected.reason}`);
+			return;
 		}
+		pendingDraft = undefined;
+		runtimeActive = {
+			revision: draft.generation,
+			checkpoint: draft.checkpoint,
+			activatedAt: draft.createdAt,
+		};
+		awaitObservationForRevision = draft.generation;
+		lastBudgetReading = undefined;
+		queueOutcomeNotice(`Committed revision ${draft.generation} at the next context boundary.${draft.shape ? ` ${draft.shape}` : ""}`);
 	}
 
 	async function replaceStore(ctx: ExtensionContext): Promise<void> {
@@ -733,6 +749,7 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 		restoreSettings(branch);
 		turnBaseline = undefined;
 		pendingDraft = undefined;
+		runtimeActive = undefined;
 		currentContextView = undefined;
 		observedUsage = undefined;
 		awaitObservationForRevision = undefined;
@@ -761,10 +778,30 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 	 */
 	function branchEntries(ctx: ExtensionContext): BranchEntryLike[] | undefined {
 		const manager = ctx.sessionManager as unknown as {
+			buildContextEntries?: () => unknown[];
 			buildSessionProjection?: () => {
 				entries?: Array<{ sourceEntry?: { id?: unknown }; messages?: unknown }>;
 			};
 		};
+		// Pi 0.85 exposes buildContextEntries/sessionEntryToContextMessages. Use those
+		// as the real entry ledger, retaining entry ids for stable replay.
+		if (typeof manager.buildContextEntries === "function") {
+			try {
+				const entries = manager.buildContextEntries();
+				if (Array.isArray(entries) && entries.length > 0) {
+					const refs: BranchEntryLike[] = [];
+					for (const entry of entries) {
+						const id = (entry as { id?: unknown })?.id;
+						if (typeof id !== "string" || id.length === 0) continue;
+						const messages = sessionEntryToContextMessages(entry as never) as LiveContextMessage[];
+						refs.push({ id, messages });
+					}
+					if (refs.length > 0) return refs;
+				}
+			} catch {
+				// Fall through to the older projection shape when the host supplies it.
+			}
+		}
 		if (typeof manager.buildSessionProjection !== "function") return undefined;
 		let projection: { entries?: Array<{ sourceEntry?: { id?: unknown }; messages?: unknown }> };
 		try {
@@ -801,7 +838,7 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 		recovery: Extract<ProjectionRecovery, { valid: true }>;
 	} | undefined {
 		if (
-			state.checkpoint ||
+			activeCheckpoint() ||
 			state.lastOutcome?.kind !== "reset" ||
 			state.lastOutcome.message !== PROJECTION_PREFIX_MISMATCH_REASON
 		) return undefined;
@@ -819,7 +856,7 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 		target: ProjectionCheckpoint,
 		recovery: Extract<ProjectionRecovery, { valid: true }>,
 	): void {
-		const revision = state.revision + 1;
+		const revision = activeRevision() + 1;
 		const at = new Date().toISOString();
 		const beforeTokens = estimateLiveContextTokens(selectContextVisibleMessages(rawMessages));
 		const afterTokens = estimateLiveContextTokens(selectContextVisibleMessages(recovery.messages));
@@ -887,7 +924,7 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 		// prefix the active revision replaced: that context no longer exists. Deriving this
 		// from positions (not from in-memory flags) keeps it correct after resume and /tree.
 		const observedStale =
-			observed !== undefined && state.checkpoint !== undefined && observed.index < state.checkpoint.sourceMessageCount;
+			observed !== undefined && activeCheckpoint() !== undefined && observed.index < activeCheckpoint()!.sourceMessageCount;
 		const reading: BudgetReading = {
 			...resolved,
 			estimated: estimateRequestTokens(ctx, modelEffectiveMessages, knownNotices),
@@ -1019,7 +1056,7 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 				source: {
 					sessionId: ctx.sessionManager.getSessionId(),
 					entryId: sourceEntry.id,
-					revision: state.revision,
+					revision: activeRevision(),
 					contentHash: sourceContentHash(sourceMessage),
 					role: sourceMessage.role,
 				},
@@ -1076,6 +1113,7 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 		},
 	});
 
+	if (editingMode === "clm") {
 	const CommitParameters = Type.Object({});
 	pi.registerTool({
 		name: "live_context_commit",
@@ -1094,16 +1132,25 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 					details: { queued: false },
 				};
 			}
-			if (pendingDraft.baseRevision !== state.revision) {
+			if (pendingDraft.baseRevision !== activeRevision()) {
 				pendingDraft = undefined;
 				throw new Error("The draft's base revision changed; edit and commit again.");
 			}
+			if (pendingDraft.queued) {
+				return {
+					content: [{ type: "text", text: `Draft revision ${pendingDraft.generation} is already queued.` }],
+					details: { queued: true, generation: pendingDraft.generation, baseRevision: pendingDraft.baseRevision },
+				};
+			}
+			pendingDraft.queued = true;
 			return {
 				content: [{ type: "text", text: `Draft revision ${pendingDraft.generation} is queued for the next verified context boundary.` }],
 				details: { queued: true, generation: pendingDraft.generation, baseRevision: pendingDraft.baseRevision },
 			};
 		},
 	});
+
+	}
 
 	pi.registerCommand(commandName, {
 		description:
@@ -1210,7 +1257,7 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 		const sessionRawMessages = asLiveMessages(
 			buildSessionContext(ctx.sessionManager.getEntries(), ctx.sessionManager.getLeafId()).messages,
 		);
-		const sessionProjection = state.enabled ? applyProjection(sessionRawMessages, state.checkpoint) : undefined;
+		const sessionProjection = state.enabled ? applyProjection(sessionRawMessages, activeCheckpoint()) : undefined;
 		const visibleRaw = selectContextVisibleMessages(sessionRawMessages);
 		const effective = selectContextVisibleMessages(
 			sessionProjection?.valid ? sessionProjection.messages : sessionRawMessages,
@@ -1373,6 +1420,7 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 				lifecycleEpoch++;
 				turnBaseline = undefined;
 				pendingDraft = undefined;
+				runtimeActive = undefined;
 				currentContextView = undefined;
 				updateStatus(ctx);
 				stickyNotice = undefined;
@@ -1384,6 +1432,7 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 				lifecycleEpoch++;
 				turnBaseline = undefined;
 				pendingDraft = undefined;
+				runtimeActive = undefined;
 				currentContextView = undefined;
 				lastBudgetReading = undefined;
 				projectionReplaced = true;
@@ -1395,6 +1444,12 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 			case "commit":
 				if (editingMode !== "clm") { ctx.ui.notify("Commit is CLM mode only.", "warning"); return; }
 				if (!pendingDraft) { ctx.ui.notify("No accepted draft is pending; edit the mirror first.", "warning"); return; }
+				if (pendingDraft.baseRevision !== activeRevision()) {
+					pendingDraft = undefined;
+					ctx.ui.notify("The draft's base revision changed; edit and commit again.", "warning");
+					return;
+				}
+				pendingDraft.queued = true;
 				ctx.ui.notify(`Draft revision ${pendingDraft.generation} is queued for the next verified context boundary.`, "info");
 				return;
 			default:
@@ -1402,7 +1457,7 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 		}
 		ctx.ui.notify(
 			editingMode === "clm"
-				? `Usage: /${commandName} [${CLM_VIEW_TABS.join("|")}|status|config [<setting> <value>|reset]|on|off|reset|path]`
+				? `Usage: /${commandName} [${CLM_VIEW_TABS.join("|")}|status|config [<setting> <value>|reset]|on|off|reset|commit|path]`
 				: `Usage: /${commandName} [status|on|off|reset|path]`,
 			"warning",
 		);
@@ -1425,6 +1480,7 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 				// diagnostics only
 			}
 		}
+		quarantined = undefined;
 		pressure.reset();
 		budgetTracker.reset();
 		mirrorMutationSeen = false;
@@ -1448,12 +1504,14 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 		if (!state.enabled) {
 			turnBaseline = undefined;
 			pendingDraft = undefined;
+			runtimeActive = undefined;
 			continuitySize.observe(0);
 			return;
 		}
 		if (!store) {
 			turnBaseline = undefined;
 			pendingDraft = undefined;
+			runtimeActive = undefined;
 			const managedContinuity = continuityMessage(ctx, rawMessages);
 			const output = managedContinuity ? [...rawMessages, managedContinuity] : [...rawMessages];
 			const sizeNotice = continuitySizeNotice(managedContinuity);
@@ -1470,16 +1528,16 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 		}
 
 		// Activate any accepted draft at this verified context boundary before rendering.
-		commitPendingDraft(ctx);
+		commitPendingDraft(ctx, rawMessages);
 
 		let effectiveMessages = rawMessages;
 		let suffixMessages: LiveContextMessage[] = [];
-		let projection = applyProjection(rawMessages, state.checkpoint);
+		let projection = applyProjection(rawMessages, activeCheckpoint());
 		let recovered = false;
 		let reanchored: Extract<ProjectionReanchoring, { valid: true }> | undefined;
 
-		if (!projection.valid && state.checkpoint) {
-			const target = state.checkpoint;
+		if (!projection.valid && activeCheckpoint()) {
+			const target = activeCheckpoint()!;
 			// Pi's `/tree` undo changes the raw prefix without changing entry identity, so a
 			// prefix mismatch is not evidence that the managed compaction is stale. Replay the
 			// checkpoint onto the live branch first; the positional digest stays as the fast path.
@@ -1498,7 +1556,7 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 					recovered = true;
 				}
 			}
-		} else if (!state.checkpoint) {
+		} else if (!activeCheckpoint()) {
 			const historical = findHistoricalRecovery(rawMessages);
 			if (historical) {
 				rebaseRecoveredProjection(ctx, rawMessages, historical.target, historical.recovery);
@@ -1507,10 +1565,10 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 			}
 		}
 
-		if (reanchored && state.checkpoint) {
-			const target = state.checkpoint;
+		if (reanchored && activeCheckpoint()) {
+			const target = activeCheckpoint()!;
 			const rebased = createProjectionCheckpoint({
-				revision: state.revision + 1,
+				revision: activeRevision() + 1,
 				sourceMessages: rawMessages,
 				sourceEntries: coveredSourceEntries(ctx, rawMessages),
 				projectedMessages: reanchored.messages,
@@ -1530,20 +1588,24 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 				`Re-anchored projection revision ${target.revision} onto the current branch` +
 				(details.length > 0 ? `; ${details.join(" and ")}` : "") +
 				` as revision ${rebased.revision}.`;
-			persist({
-				version: 1,
-				enabled: state.enabled,
-				revision: rebased.revision,
-				checkpoint: rebased,
-				lastOutcome: {
-					kind: "applied",
-					message,
-					beforeEstimate: rebased.beforeEstimate,
-					afterEstimate: rebased.afterEstimate,
-					estimateUnit: "tokens",
-					at: rebased.createdAt,
-				},
-			});
+			if (editingMode === "clm") {
+				runtimeActive = { revision: rebased.revision, checkpoint: rebased, activatedAt: rebased.createdAt };
+			} else {
+				persist({
+					version: 1,
+					enabled: state.enabled,
+					revision: rebased.revision,
+					checkpoint: rebased,
+					lastOutcome: {
+						kind: "applied",
+						message,
+						beforeEstimate: rebased.beforeEstimate,
+						afterEstimate: rebased.afterEstimate,
+						estimateUnit: "tokens",
+						at: rebased.createdAt,
+					},
+				});
+			}
 			awaitObservationForRevision = rebased.revision;
 			if (reanchored.replacedEntryIds.length > 0) {
 				ctx.ui.notify(
@@ -1559,12 +1621,14 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 		if (projection.valid) {
 			effectiveMessages = projection.messages;
 			suffixMessages = projection.suffix;
-			if (state.checkpoint || recovered) {
+			if (activeCheckpoint() || recovered) {
 				invalidationStreak = 0;
 				compositionWarned = false;
 			}
 		} else {
 			invalidationStreak += 1;
+			runtimeActive = undefined;
+			pendingDraft = undefined;
 			persist(resetProjectionState(state, projection.reason));
 			// The meter must follow the history that is actually sent: a reading taken from the
 			// dropped projection would keep quoting a context that no longer exists.
@@ -1610,7 +1674,7 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 					saveDirectory: store ? join(store.directory, "withheld") : undefined,
 					// Only the raw suffix after the accepted projection is withholdable; the
 					// model's own accepted context is respected.
-					protectBefore: state.checkpoint
+					protectBefore: activeCheckpoint()
 						? Math.max(0, effectiveMessages.length - selectContextVisibleMessages(suffixMessages).length)
 						: 0,
 				});
@@ -1644,14 +1708,20 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 
 		// Extension-managed continuity is appended after the editable projection so
 		// mirror compression cannot silently remove an active obligation or exact pin.
-		const snapshot = renderContextDocument(effectiveMessages, {
-			revision: state.revision,
+		const mirrorMessages = pendingDraft && pendingDraft.baseRevision === activeRevision()
+			? (() => {
+				const draftProjection = applyProjection(rawMessages, pendingDraft.checkpoint);
+				return draftProjection.valid ? draftProjection.messages : pendingDraft.checkpoint.projectedMessages;
+			})()
+			: effectiveMessages;
+		const snapshot = renderContextDocument(mirrorMessages, {
+			revision: pendingDraft?.generation ?? activeRevision(),
 			...(editingMode === "clm"
 				? {
 					protectedIndexes: new Set<number>(),
 					// Nonce stays constant until the next accepted edit: header ids read on
 					// one call remain valid on the next.
-					documentSeed: `${ctx.sessionManager.getSessionId()}:${state.checkpoint?.sourceDigest ?? "raw"}`,
+					documentSeed: `${ctx.sessionManager.getSessionId()}:${pendingDraft?.checkpoint.sourceDigest ?? activeCheckpoint()?.sourceDigest ?? "raw"}`,
 				}
 				: {}),
 		});
@@ -1659,7 +1729,7 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 			await store.write(snapshot.text);
 			turnBaseline = {
 				rawMessages: [...rawMessages],
-				effectiveMessages: [...effectiveMessages],
+				effectiveMessages: [...mirrorMessages],
 				snapshot,
 			};
 		} catch (error) {
@@ -1719,14 +1789,26 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 		if (event.reason !== "threshold") return undefined;
 		const resolved = resolveBudget(budgetPolicy, ctx.model?.contextWindow);
 		if (!resolved || overflowGuard.mode === "off") return undefined;
+		const limit = overflowGuardLimit(resolved.budget, resolved.reserve, ctx.model?.contextWindow);
+		if (limit <= 0) return undefined;
+		// v1 narrow truth table: cancel only when a fresh, verified post-guard
+		// effective context already fits the guard limit. Stale or unmeasurable
+		// readings allow native compaction instead of making an unsafe promise.
 		const effective = currentContextView
 			? calibrator.apply(estimateTextTokens(ctx.getSystemPrompt?.() ?? "") + currentContextView.effectiveTokens)
 			: undefined;
+		if (effective === undefined || effective > limit) return undefined;
 		ctx.ui.notify(
-			`pi-clm: cancelled Pi's threshold compaction (raw-history based); the effective context is ~${effective?.toLocaleString("en-US") ?? "?"} tokens and the overflow guard enforces ${overflowGuardLimit(resolved.budget, resolved.reserve, ctx.model?.contextWindow).toLocaleString("en-US")}.`,
+			`pi-clm: cancelled Pi's threshold compaction (raw-history based); the effective context is ~${effective.toLocaleString("en-US")} tokens and the overflow guard enforces ${limit.toLocaleString("en-US")}.`,
 			"info",
 		);
 		return { cancel: true };
+	});
+
+	pi.on("session_compact_failed", async (event, ctx) => {
+		if (editingMode !== "clm") return;
+		queueOutcomeNotice(`Pi compaction failed (${event.reason}); the active CLM projection and draft are preserved.`);
+		ctx.ui.notify(`pi-clm: Pi compaction failed; context state preserved.`, "warning");
 	});
 
 	pi.on("turn_start", () => {
@@ -1800,7 +1882,8 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 		}
 		// A tree move/reset/shutdown during async I/O invalidates the captured draft,
 		// even when the newly selected branch happens to have the same revision number.
-		if (epoch !== lifecycleEpoch || activeStore !== store || !state.enabled || baseline.snapshot.revision !== state.revision) return;
+		const baselineRevision = pendingDraft?.generation ?? activeRevision();
+		if (epoch !== lifecycleEpoch || activeStore !== store || !state.enabled || baseline.snapshot.revision !== baselineRevision) return;
 		if (editedText === undefined || editedText.trim() === baseline.snapshot.text.trim()) return;
 
 		// Pi's provider-independent token estimator is injected as the single acceptance
@@ -1833,7 +1916,7 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 			return;
 		}
 
-		const revision = state.revision + 1;
+		const revision = baselineRevision + 1;
 		const appliedMessage = editingMode === "clm"
 			? `Accepted draft revision ${revision}; commit is queued for the next verified context boundary.`
 			: `Applied revision ${revision}; estimated tokens ${beforeTokens}→${afterTokens}.`;
@@ -1889,13 +1972,16 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 		const restored = result.diagnostics.length > 0 ? ` ${result.diagnostics.join(" ")}` : "";
 		const shape = editShapeText(result.editTrace, result.diagnostics);
 		if (editingMode === "clm") {
+			const replacedQueued = pendingDraft?.queued === true;
 			pendingDraft = {
 				generation: revision,
-				baseRevision: state.revision,
+				baseRevision: activeRevision(),
 				checkpoint,
 				createdAt: at,
 				shape,
+				queued: false,
 			};
+			if (replacedQueued) queueOutcomeNotice("The queued draft was replaced by a newer draft; commit again.");
 		} else {
 			// Conservative mode keeps its immediate activation contract.
 			persist({
@@ -1914,35 +2000,53 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 			});
 			awaitObservationForRevision = revision;
 		}
-		const managedContinuity = continuityMessage(ctx, result.messages);
-		const modelEffectiveMessages = managedContinuity
-			? [...result.messages, managedContinuity]
-			: result.messages;
-		currentContextView = {
-			rawMessageCount: baseline.rawMessages.length,
-			rawMessages: [...baseline.rawMessages],
-			effectiveMessages: [...modelEffectiveMessages],
-			suffixMessageCount: 0,
-			rawTokens: estimateLiveContextTokens(selectContextVisibleMessages(baseline.rawMessages)),
-			effectiveTokens: managedContinuity
-				? estimateLiveContextTokens(modelEffectiveMessages)
-				: afterTokens,
-			capturedAt: at,
-		};
+		if (editingMode !== "clm") {
+			const managedContinuity = continuityMessage(ctx, result.messages);
+			const modelEffectiveMessages = managedContinuity
+				? [...result.messages, managedContinuity]
+				: result.messages;
+			currentContextView = {
+				rawMessageCount: baseline.rawMessages.length,
+				rawMessages: [...baseline.rawMessages],
+				effectiveMessages: [...modelEffectiveMessages],
+				suffixMessageCount: 0,
+				rawTokens: estimateLiveContextTokens(selectContextVisibleMessages(baseline.rawMessages)),
+				effectiveTokens: managedContinuity
+					? estimateLiveContextTokens(modelEffectiveMessages)
+					: afterTokens,
+				capturedAt: at,
+			};
+		}
 		queueOutcomeNotice(`${appliedMessage}${shape ? ` ${shape}` : ""}${restored}`);
 		updateStatus(ctx);
 	});
 
 	pi.on("session_tree", async (_event, ctx) => {
 		restore(ctx);
-		queueOutcomeNotice(`Restored live-context state for the selected branch (revision ${state.revision}).`);
+		queueOutcomeNotice(`Restored live-context state for the selected branch (revision ${activeRevision()}).`);
 	});
 
 	pi.on("session_compact", async (_event, ctx) => {
-		persist(resetProjectionState(state, "Projection reset after native Pi compaction."));
+		try {
+			persist(resetProjectionState(state, "Projection reset after native Pi compaction."));
+		} catch (error) {
+			lifecycleEpoch++;
+			pendingDraft = undefined;
+			runtimeActive = undefined;
+			turnBaseline = undefined;
+			currentContextView = undefined;
+			lastBudgetReading = undefined;
+			projectionReplaced = true;
+			quarantined = `Native compaction succeeded but the durable reset could not be verified (${error instanceof Error ? error.message : String(error)}).`;
+			queueOutcomeNotice(quarantined);
+			ctx.ui.notify(`pi-clm: ${quarantined}`, "error");
+			updateStatus(ctx);
+			return;
+		}
 		lifecycleEpoch++;
 		turnBaseline = undefined;
 		pendingDraft = undefined;
+		runtimeActive = undefined;
 		currentContextView = undefined;
 		lastBudgetReading = undefined;
 		projectionReplaced = true;
@@ -1956,6 +2060,7 @@ export default function liveContextExtension(pi: ExtensionAPI, options: LiveCont
 		lifecycleEpoch++;
 		turnBaseline = undefined;
 		pendingDraft = undefined;
+		runtimeActive = undefined;
 		currentContextView = undefined;
 		ctx.ui.setStatus(STATUS_KEY, undefined);
 		await store?.cleanup().catch(() => undefined);

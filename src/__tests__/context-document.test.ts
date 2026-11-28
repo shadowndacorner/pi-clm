@@ -280,11 +280,15 @@ describe("tool-call structure repair", () => {
 		assert.equal(incomplete.accepted, true);
 		assert.equal(hasOrphanToolMessages(incomplete.messages), false);
 		assert.equal(incomplete.messages.some((message) => message.role === "toolResult"), false);
-		// Group repair drops the whole incomplete group, so the assistant is traced as
-		// removed rather than pointing at a projection position that no longer exists.
-		const droppedAssistant = incomplete.editTrace?.sources.find((entry) => entry.sourceIndex === 1);
-		assert.equal(droppedAssistant?.kind, "removed");
-		assert.equal(droppedAssistant?.outputIndex, undefined);
+		// The incomplete pure-call group becomes one static CLM tombstone; it stays
+		// represented without serializing call arguments or leaving an orphan result.
+		const tombstone = incomplete.messages.find((message) => message.customType === "clm:terminal-incomplete");
+		assert.ok(tombstone, "the incomplete group must be terminalized");
+		const removedAssistant = incomplete.editTrace?.sources.find((entry) => entry.sourceIndex === 1);
+		assert.equal(removedAssistant?.kind, "removed");
+		assert.equal(removedAssistant?.outputIndex, undefined);
+		assert.ok(incomplete.editTrace?.additions.some((entry) => entry.outputIndex === incomplete.messages.indexOf(tombstone)),
+			"the tombstone is a new CLM-authored output");
 		for (const entry of incomplete.editTrace?.sources ?? []) {
 			if (entry.outputIndex !== undefined) assert.ok(entry.outputIndex < incomplete.messages.length, "trace outputIndex must address the projection");
 		}

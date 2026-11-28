@@ -83,7 +83,8 @@ describe("edit trace alignment after tool-group repair", () => {
 		const result = applyContextDocument(edited, snapshot, clm);
 
 		assert.equal(result.accepted, true, result.reason);
-		assert.equal(result.messages.length, 5, "the dropped group must be gone from the projection");
+		assert.equal(result.messages.length, 6, "the terminalized group remains one tombstone in the projection");
+		assert.equal(result.messages.some((message) => message.customType === "clm:terminal-incomplete"), true);
 		assertTraceAlignsWithOutput(result, snapshot);
 	});
 
@@ -102,12 +103,11 @@ describe("edit trace alignment after tool-group repair", () => {
 				addition.outputIndex < result.messages.length,
 				`addition outputIndex ${addition.outputIndex} is outside the ${result.messages.length}-message projection`,
 			);
-			assert.match(
-				JSON.stringify(result.messages[addition.outputIndex]?.content ?? ""),
-				/key fact: 7/,
-				"the addition must point at the note it added",
-			);
 		}
+		const noteAddition = trace?.additions.find((addition) =>
+			JSON.stringify(result.messages[addition.outputIndex]?.content ?? "").includes("key fact: 7"),
+		);
+		assert.ok(noteAddition, "the added notes block must have its own trace entry");
 	});
 
 	test("an orphaned tool result is dropped and later trace entries stay aligned", () => {
@@ -152,7 +152,7 @@ describe("edit trace alignment after tool-group repair", () => {
 		assert.equal(result.accepted, true, result.reason);
 		const trace = result.editTrace;
 		assert.ok(trace);
-		const editedEntry = trace.sources.find((source) => source.kind === "edited" || source.kind === "normalized");
+		const editedEntry = trace.sources.find((source) => source.kind === "edited");
 		assert.ok(editedEntry, "the shortened assistant turn must be traced as edited");
 		const described = result.messages[editedEntry!.outputIndex!];
 		assert.ok(

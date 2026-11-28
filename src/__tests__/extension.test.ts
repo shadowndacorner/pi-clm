@@ -875,7 +875,7 @@ describe("live-context extension lifecycle", () => {
 });
 
 describe("pi-clm entry point", () => {
-	test("failed persistence leaves the previous projection active", async () => {
+	test("an accepted CLM draft is memory-only and does not require a durable append", async () => {
 		const harness = createHarness();
 		clmExtension(harness.pi);
 		await emit(harness, "session_start", {});
@@ -888,10 +888,13 @@ describe("pi-clm entry point", () => {
 			await writeFile(path, original.replace("Solve the task", "not committed"));
 			harness.pi.appendEntry = () => { throw new Error("simulated disk error"); };
 			await emit(harness, "turn_end", {});
+			assert.equal(harness.branch.length, 0, "acceptance writes no durable checkpoint");
+			const commit = harness.tools.get("live_context_commit");
+			const queued = await commit.execute("commit-1", {}, undefined, undefined, harness.ctx);
+			assert.match(String(queued.content[0].text), /queued/);
 			const next = await emit(harness, "context", { messages: raw });
-			assert.equal(next[0].messages[0].content, "Solve the task");
-			assert.match(JSON.stringify(next[0].messages), /persistence failed/);
-			assert.equal(harness.branch.length, 0);
+			assert.equal(next[0].messages[0].content, "not committed");
+			assert.doesNotMatch(JSON.stringify(next[0].messages), /persistence failed/);
 		} finally { await emit(harness, "session_shutdown", {}); }
 	});
 
@@ -918,7 +921,7 @@ describe("pi-clm entry point", () => {
 		} finally { await emit(harness, "session_shutdown", {}); }
 	});
 
-	test("registers clm commands, allows multiple writes, commits growth and restores on resume", async () => {
+	test("registers clm commands, allows multiple writes, queues growth, and reloads durable raw context", async () => {
 		const harness = createHarness();
 		clmExtension(harness.pi);
 		assert.ok(harness.commands.has("clm"));
@@ -940,8 +943,11 @@ describe("pi-clm entry point", () => {
 			}
 			await writeFile(path, original.replace("Solve the task", "expanded task ".repeat(100)));
 			await emit(harness, "turn_end", {});
-			await emit(harness, "context", { messages: raw });
-			assert.equal(harness.branch.at(-1)?.data.lastOutcome.kind, "applied");
+			assert.equal(harness.branch.filter((entry) => entry.customType === LIVE_CONTEXT_STATE).length, 0,
+				"CLM acceptance is memory-only");
+			const commit = harness.tools.get("live_context_commit");
+			assert.ok(commit, "the commit tool exists in CLM mode");
+			await commit.execute("commit-1", {}, undefined, undefined, harness.ctx);
 			const projected = await emit(harness, "context", { messages: raw });
 			assert.equal(projected[0].messages[0].content, "expanded task ".repeat(100).trim());
 			const notices = projected[0].messages
@@ -956,7 +962,7 @@ describe("pi-clm entry point", () => {
 			await emit(resumed, "session_start", { reason: "resume" });
 			try {
 				const restored = await emit(resumed, "context", { messages: raw });
-				assert.equal(restored[0].messages[0].content, projected[0].messages[0].content);
+				assert.equal(restored[0].messages[0].content, "Solve the task", "volatile CLM commits are dropped on reload");
 			} finally { await emit(resumed, "session_shutdown", {}); }
 		} finally { await emit(harness, "session_shutdown", {}); }
 	});
@@ -1000,6 +1006,8 @@ describe("pi-clm entry point", () => {
 			const document = await readFile(path, "utf8");
 			await writeFile(path, document.replace("x".repeat(40), "compacted"));
 			await emit(harness, "turn_end", {});
+			const commit = harness.tools.get("live_context_commit");
+			await commit.execute("commit-1", {}, undefined, undefined, harness.ctx);
 			const after = await emit(harness, "context", { messages: raw });
 			assert.equal(after[0].messages.some((m: any) => typeof m.content === "string" && m.content.startsWith("[CLM BUDGET]")), false);
 
@@ -1037,6 +1045,8 @@ describe("pi-clm entry point", () => {
 			const text = await readFile(path, "utf8");
 			await writeFile(path, text.replace(/(\[\[CTX_TURN[^\n]+index=2[^\n]+\]\]\n)[\s\S]*$/, "$1tiny"));
 			await emit(harness, "turn_end", {});
+			const commit = harness.tools.get("live_context_commit");
+			await commit.execute("commit-1", {}, undefined, undefined, harness.ctx);
 			assert.equal(budgetNotices(await emit(harness, "context", { messages: raw })).length, 0, "same runtime: stale observation ignored");
 
 			const resumed = createHarness([...harness.branch]);
@@ -1045,15 +1055,15 @@ describe("pi-clm entry point", () => {
 			resumed.ctx.getSystemPrompt = () => "";
 			await emit(resumed, "session_start", { reason: "resume" });
 			try {
-				assert.equal(budgetNotices(await emit(resumed, "context", { messages: raw })).length, 0, "after resume: still stale");
+				// Reload drops the volatile commit: the raw transcript is restored, so the old
+				// provider observation is no longer attached to a lost runtime revision.
+				const restored = await emit(resumed, "context", { messages: raw });
+				assert.match(JSON.stringify(restored[0].messages), /large/);
+				assert.doesNotMatch(JSON.stringify(restored[0].messages), /tiny/);
 				await emit(resumed, "session_tree", {});
-				assert.equal(budgetNotices(await emit(resumed, "context", { messages: raw })).length, 0, "after /tree: still stale");
-				// A new request answered after the revision is fresh and governs again.
-				const grown: LiveContextMessage[] = [...raw, { ...raw[1], timestamp: 3, usage: { input: 700, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 700, cost: { total: 0 } } } as LiveContextMessage];
-				const fresh = budgetNotices(await emit(resumed, "context", { messages: grown }));
-				assert.equal(fresh.length, 1);
-				assert.match(fresh[0].content, /provider reported 700 for the previous one\./);
-				assert.match(fresh[0].content, /excluding tool schemas and provider framing/);
+				const afterTree = await emit(resumed, "context", { messages: raw });
+				assert.match(JSON.stringify(afterTree[0].messages), /large/);
+				assert.doesNotMatch(JSON.stringify(afterTree[0].messages), /tiny/);
 			} finally { await emit(resumed, "session_shutdown", {}); }
 		} finally { await emit(harness, "session_shutdown", {}); }
 	});
@@ -1634,11 +1644,15 @@ describe("pi-clm entry point", () => {
 		assert.ok(commit);
 		const queued = await commit.execute("commit-1", {}, undefined, undefined, harness.ctx);
 		assert.match(String(queued.content[0].text), /queued/);
-		await emit(harness, "context", { type: "context", messages: raw });
-		const persisted = harness.branch.filter((entry) => entry.customType === LIVE_CONTEXT_STATE).at(-1);
-		assert.equal(persisted.data.lastOutcome.kind, "applied");
-		assert.equal(persisted.data.revision, 1);
-		assert.match(persisted.data.lastOutcome.message, /Committed revision 1.*context shape/);
+		const projected = await emit(harness, "context", { type: "context", messages: raw });
+		assert.match(JSON.stringify(projected[0].messages), /Investigation complete: parser\.ts is the only relevant file\./);
+		assert.equal(harness.branch.filter((entry) => entry.customType === LIVE_CONTEXT_STATE).length, 0,
+			"the activated commit remains memory-only");
+		const notices = projected[0].messages
+			.filter((message: LiveContextMessage) => message.customType === "live-context-notice")
+			.map((message: LiveContextMessage) => String(message.content));
+		assert.ok(notices.some((text: string) => /Committed revision 1/.test(text) && /context shape/.test(text)),
+			`expected a commit notice with shape: ${notices.join(" | ")}`);
 		const noDraft = await commit.execute("commit-2", {}, undefined, undefined, harness.ctx);
 		assert.match(String(noDraft.content[0].text), /No accepted draft/);
 		await emit(harness, "session_shutdown", {});

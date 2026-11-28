@@ -129,8 +129,8 @@ export function applyOverflowGuard(messages: LiveContextMessage[], options: Appl
 		if (!file && options.saveDirectory) {
 			try {
 				mkdirSync(options.saveDirectory, { recursive: true, mode: 0o700 });
-				const safeId = String(source.toolCallId ?? `idx${index}`).replace(/[^A-Za-z0-9_-]/g, "_");
-				file = join(options.saveDirectory, `${safeId}.txt`);
+				const safeId = String(source.toolCallId ?? "unknown").replace(/[^A-Za-z0-9_-]/g, "_");
+				file = join(options.saveDirectory, `${safeId}-${index}.txt`);
 				writeFileSync(file, toolResultText(source), { mode: 0o600 });
 				savedFiles.set(source, file);
 			} catch {

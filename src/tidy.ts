@@ -24,7 +24,9 @@ Trim in place: replace the body of each spent block with what it was and what it
 
 {{instructions}}
 
-When the edit is saved, reply in one line: which blocks you trimmed, and the new approximate size.`;
+When the edit is saved, call \`live_context_commit\` to queue it for the next request boundary. Do not assume the queued draft is active in this turn.
+
+Your last step: if the work you were doing is still ongoing, continue it after committing; otherwise, reply in one line: which blocks you trimmed, and the new approximate size.`;
 
 export interface TidyPromptValues {
 	mirror: string;

@@ -93,7 +93,7 @@ export function capToolResult(message: LiveContextMessage, policy: ObservationCa
 	};
 }
 
-const cappedCache = new WeakMap<LiveContextMessage, Map<number, LiveContextMessage>>();
+const cappedCache = new WeakMap<LiveContextMessage, Map<string, LiveContextMessage>>();
 
 /** Cap every tool result in `messages`; unchanged messages are returned as-is. */
 export function capObservations(messages: LiveContextMessage[], policy: ObservationCapPolicy): LiveContextMessage[] {
@@ -106,10 +106,11 @@ export function capObservations(messages: LiveContextMessage[], policy: Observat
 			perCap = new Map();
 			cappedCache.set(message, perCap);
 		}
-		let capped = perCap.get(policy.maxCharacters!);
+		const cacheKey = `${policy.maxCharacters}:${policy.headFraction}`;
+		let capped = perCap.get(cacheKey);
 		if (!capped) {
 			capped = capToolResult(message, policy);
-			perCap.set(policy.maxCharacters!, capped);
+			perCap.set(cacheKey, capped);
 		}
 		if (capped !== message) changed = true;
 		return capped;
