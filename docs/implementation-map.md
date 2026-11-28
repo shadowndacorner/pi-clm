@@ -1,4 +1,4 @@
-# Implementation map: staged batched CLM commits (v6)
+# Implementation map: staged batched CLM commits (v7)
 
 Status: implementation-readiness artifact for issue #4 v14. This is a code-change map, not implementation approval. Target: `shadowndacorner/pi-clm` at `3e4e977`; Pi v0.85.0. Scope: CLM mode only; conservative mode unchanged.
 
@@ -227,34 +227,61 @@ Queue/activation occurs at a verified `context` boundary.
 
 ## 11. Max-output-token lifting
 
-`before_provider_request` must not use `lastBudgetReading` alone. It needs an executable final-payload gate.
+`before_provider_request` must not use `lastBudgetReading` alone. It needs an executable final-payload gate. v1 lifts only for an explicitly enumerated payload variant; every other variant denies lift and leaves its output-limit fields unchanged.
 
-Finite allowlist of supported final payload variants:
+### Supported v1 payload variant
 
-- provider request object with `messages: Array<{ role, content }>`;
-- optional `system`/`instructions` string;
-- optional `tools: Array<{ name, description, parameters }>`;
-- optional `response_format`/`output_schema`;
-- fixed framing/metadata fields;
-- content parts limited to text, tool-call arguments, and JSON schema serialization. Images, audio, opaque blobs, unknown nested objects, and unrecognized transforms are denied.
+v1 supports exactly the OpenAI-compatible final payload shape:
 
-Conservative bound procedure:
+- top-level keys allowed only: `model`, `messages`, `tools`, `tool_choice`, `response_format`, `stream`, `temperature`, `max_tokens`, `max_completion_tokens`;
+- `model` is a string; `stream` is a boolean; `temperature` is a finite number;
+- `messages` is an array; each element has exactly `role` (string) and `content` (string). Array content parts, images, audio, opaque blobs, and unknown nested content are denied;
+- `tools` is an array; each element has exactly `name` (string), `description` (string), and `parameters` (JSON object). The whole `parameters` object is counted by serialized bytes; non-JSON values deny;
+- `tool_choice` is a string or the exact object `{type:"auto"|"none"|"required"|"function", function?:{name:string}}`; unknown forms deny;
+- `response_format` is exactly `{type:"json_schema", json_schema:{name:string, schema:JSON object}}` or `{type:"json_object"}`; unknown forms deny;
+- unknown top-level keys, unknown nested keys, arrays where a string is required, nulls, and unserializable values deny.
 
-`U(payload) = sum(estimateTextTokens(text))` over the allowlisted system/instructions and message text, plus `estimateTextTokens(JSON.stringify(tool definitions))`, `estimateTextTokens(JSON.stringify(response format/schema))`, `MESSAGE_OVERHEAD_PER_MESSAGE`, and `PROVIDER_OVERHEAD`.
+Anthropic `system` arrays, OpenAI Responses `input`/`instructions`, Google `contents`/`config`, and any other provider shape deny lift in v1. This narrow allowlist is deliberate: it is executable and testable; it is not a claim of general provider support.
 
-`CONSERVATIVE_HEADROOM = FRAMING_RESERVE(4096) + PROVIDER_OVERHEAD(2048) + UNCERTAINTY`, where `UNCERTAINTY = ceil(0.05 * U(payload))`. The framing reserve is counted once; do not also subtract it separately.
+### Conservative bound
+
+Use `B(text) = UTF-8 byte length of the serialized text`, not `estimateTextTokens`. A tokenizer cannot emit more tokens than bytes for the supported JSON/text payloads, so `B` is a conservative upper bound; if a provider-specific bound oracle contradicts it, deny lift.
+
+`U(payload) = sum(B(role)+B(content))` over messages
+`+ B(JSON.stringify(tools))` if present
+`+ B(JSON.stringify(tool_choice))` if present
+`+ B(JSON.stringify(response_format))` if present
+`+ MESSAGE_OVERHEAD_PER_MESSAGE * messageCount`.
+
+Constants, each counted exactly once:
+
+- `FRAMING_RESERVE = 4096`;
+- `PROVIDER_OVERHEAD = 2048` (headroom only, not inside `U`);
+- `MESSAGE_OVERHEAD_PER_MESSAGE = 16` (per message, inside `U`);
+- `UNCERTAINTY = ceil(0.05 * U(payload))`;
+- `CONSERVATIVE_HEADROOM = FRAMING_RESERVE + PROVIDER_OVERHEAD + UNCERTAINTY`.
 
 `desired = min(modelMax, window - U(payload) - CONSERVATIVE_HEADROOM)`.
 
+### Final digest bridge and hook ordering
+
+CLM's `context` handler sees `AgentMessage[]`, not the serialized provider request. v1 therefore requires a canonical bridge: `before_provider_request` computes `clmCandidateDigest` over the exact allowlisted top-level and nested fields after CLM's own transform, and stores that digest with the runtime/policy lease. The final `payloadDigest` must equal `clmCandidateDigest` over the same domain.
+
+Pi invokes `before_provider_request` handlers sequentially, so a later handler can replace or grow the payload. v1 lifts only when CLM's hook is verified terminal in the provider-request chain; if terminal ordering cannot be verified, deny lift. A late provider-hook mutation fixture must prove denial with untouched limits.
+
+### Lift predicates
+
 Lift is permitted only when all hold:
 
-1. payload shape is in the finite allowlist and every nested token-bearing field is enumerable;
-2. a stored `clmCandidateDigest` covers the same normalized final fields (system, messages, tools, schema); final `payloadDigest` equals it;
+1. payload shape is in the v1 allowlist and every token-bearing field is enumerated;
+2. the stored `clmCandidateDigest` covers the same normalized final fields and matches the final `payloadDigest`;
 3. runtime/policy lease matches and no downstream context growth/replacement or unknown transform occurred;
-4. `desired > 0`, `desired <= modelMax`, and `U(payload) + desired <= window - CONSERVATIVE_HEADROOM`;
-5. the field exists and `current < desired`; only existing numeric `max_tokens`, `max_completion_tokens`, or `max_output_tokens` may be raised.
+4. CLM's provider-request hook is verified terminal;
+5. `desired > 0`, `desired <= modelMax`, and `U(payload) + desired <= window - CONSERVATIVE_HEADROOM`;
+6. exactly one existing numeric output-limit field is present for the variant: `max_tokens` or `max_completion_tokens` for OpenAI-compatible chat, and only that one; conflicting simultaneous fields deny;
+7. `current < desired`; absent limits are not added.
 
-If any predicate fails, leave all three output-limit fields unchanged. Tests: nested tool/schema expansion; boundary equality `U + desired == window - CONSERVATIVE_HEADROOM`; unsupported/opaque shapes deny; stale reading denies; downstream growth/replacement denies with untouched limits; one bounded permitted lift; absent limits are not added.
+If any predicate fails, leave all output-limit fields unchanged. Tests: high-token-density Unicode/JSON against an independent bound oracle; nested tool/schema expansion; boundary equality `U + desired == window - CONSERVATIVE_HEADROOM`; unsupported/opaque/provider variants deny; stale reading denies; downstream growth/replacement denies; late provider-hook mutation denies; conflicting output-limit fields deny; untouched limits on denial; one bounded permitted lift with exact digest match; absent limits are not added.
 
 ## 12. Consumer wiring and compaction
 
@@ -328,7 +355,7 @@ Required named tests:
 - failed/buffered write -> later ordinary Pi append -> restart;
 - fixed-mask near-offset `Δ_net`, authored replacement/copy taint, capHead change, guard off/on, resurrection/double-cap;
 - all compaction truth-table cells, stale estimate + queued failed commit with no subsequent context;
-- final-payload max-token gate: downstream growth/replacement leaves all three max-output fields unchanged; bounded payload permits lift; unknown/opaque payload denies lift;
+- final-payload max-token gate: high-token-density Unicode/JSON checked against an independent bound oracle; nested tool/schema expansion; boundary equality `U + desired == window - CONSERVATIVE_HEADROOM`; unsupported/opaque/provider variants deny; stale reading denies; downstream growth/replacement denies; late provider-hook mutation denies; conflicting max-token fields deny; untouched limits on denial; absent limits are not added; one bounded permitted lift with exact candidate/final digest match;
 - no-budget/90%-soft/hard/hysteresis/growth cases;
 - full headerless rewrite retaining all owner turns and owner-body-edit allowance;
 - external write at last pre-publication boundary and during rollback;
