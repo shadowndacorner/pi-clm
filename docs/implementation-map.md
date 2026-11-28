@@ -1,4 +1,4 @@
-# Implementation map: staged batched CLM commits (v4)
+# Implementation map: staged batched CLM commits (v6)
 
 Status: implementation-readiness artifact for issue #4 v14. This is a code-change map, not implementation approval. Target: `shadowndacorner/pi-clm` at `3e4e977`; Pi v0.85.0. Scope: CLM mode only; conservative mode unchanged.
 
@@ -229,21 +229,32 @@ Queue/activation occurs at a verified `context` boundary.
 
 `before_provider_request` must not use `lastBudgetReading` alone. It needs an executable final-payload gate.
 
-Supported payload variants: provider request objects with a bounded `messages` array and enumerable token-bearing fields for system/instructions, text/tool/schema/response-format, and fixed framing. Opaque media, unknown transforms, or unrecognized payload shapes are not eligible.
+Finite allowlist of supported final payload variants:
 
-Predicate:
+- provider request object with `messages: Array<{ role, content }>`;
+- optional `system`/`instructions` string;
+- optional `tools: Array<{ name, description, parameters }>`;
+- optional `response_format`/`output_schema`;
+- fixed framing/metadata fields;
+- content parts limited to text, tool-call arguments, and JSON schema serialization. Images, audio, opaque blobs, unknown nested objects, and unrecognized transforms are denied.
 
-`U(payload) = tokens(system/instructions) + tokens(messages) + tokens(tools/schema/response-format) + fixed framing + PROVIDER_OVERHEAD + UNCERTAINTY`
+Conservative bound procedure:
 
-Lift is permitted only when all of these hold:
+`U(payload) = sum(estimateTextTokens(text))` over the allowlisted system/instructions and message text, plus `estimateTextTokens(JSON.stringify(tool definitions))`, `estimateTextTokens(JSON.stringify(response format/schema))`, `MESSAGE_OVERHEAD_PER_MESSAGE`, and `PROVIDER_OVERHEAD`.
 
-1. the payload shape is recognized and every token-bearing field is enumerable;
-2. the final payload identity matches the stored CLM candidate digest, or the final payload token bound is independently computed and bounded;
-3. `U(payload) + desired <= window - CONSERVATIVE_HEADROOM`;
-4. the provider/model cap allows `desired`;
-5. no downstream context growth/replacement, opaque media, stale estimate, or unknown transform occurred.
+`CONSERVATIVE_HEADROOM = FRAMING_RESERVE(4096) + PROVIDER_OVERHEAD(2048) + UNCERTAINTY`, where `UNCERTAINTY = ceil(0.05 * U(payload))`. The framing reserve is counted once; do not also subtract it separately.
 
-If any predicate fails, leave `max_tokens`, `max_completion_tokens`, and `max_output_tokens` unchanged. Tests: activate a valid CLM candidate, grow/replace context in a later handler, leave the CLM estimate fresh, and assert all three fields remain unchanged; test a matching bounded payload permits lift; test unknown/opaque payload denies lift.
+`desired = min(modelMax, window - U(payload) - CONSERVATIVE_HEADROOM)`.
+
+Lift is permitted only when all hold:
+
+1. payload shape is in the finite allowlist and every nested token-bearing field is enumerable;
+2. a stored `clmCandidateDigest` covers the same normalized final fields (system, messages, tools, schema); final `payloadDigest` equals it;
+3. runtime/policy lease matches and no downstream context growth/replacement or unknown transform occurred;
+4. `desired > 0`, `desired <= modelMax`, and `U(payload) + desired <= window - CONSERVATIVE_HEADROOM`;
+5. the field exists and `current < desired`; only existing numeric `max_tokens`, `max_completion_tokens`, or `max_output_tokens` may be raised.
+
+If any predicate fails, leave all three output-limit fields unchanged. Tests: nested tool/schema expansion; boundary equality `U + desired == window - CONSERVATIVE_HEADROOM`; unsupported/opaque shapes deny; stale reading denies; downstream growth/replacement denies with untouched limits; one bounded permitted lift; absent limits are not added.
 
 ## 12. Consumer wiring and compaction
 
